@@ -10,10 +10,18 @@
 # Environment hooks (passed through to the app):
 #   SIR_CONFIG=PATH  SIR_SEED=N  SIR_HEADLESS=1  SIR_MAX_STEPS=N
 #   SIR_SCREENSHOT=path.bmp  SIR_SDL2_PREFIX=...
+#   SDL_VIDEODRIVER=wayland|x11|...  (override the default below)
 #
 # Never touches data/checkpoints or data/logs.
 set -u
 cd "$(dirname "$0")"
+
+# SDL video driver: prefer Wayland when present. The default X11 driver can
+# hang inside SDL_CreateWindow on Xwayland compositors (no window appears,
+# the app sits at 0% CPU forever). An explicit SDL_VIDEODRIVER always wins.
+if [ -z "${SDL_VIDEODRIVER:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  export SDL_VIDEODRIVER=wayland
+fi
 
 BUILD_DIR="build"
 CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
@@ -81,6 +89,18 @@ build() {
   cmake --build "$BUILD_DIR" -j"$(nproc)" "$@"
 }
 
+# Only one sir instance at a time: the checkpoint file is single-owner and
+# two concurrent cmake runs in one build tree deadlock. The lock lives in
+# /tmp (per-project) so it survives --clean and is released even if the
+# build dir is removed. Uses flock(1); no-op if unavailable.
+LOCK_FILE="${TMPDIR:-/tmp}/sir-$(printf '%s' "$PWD" | cksum | cut -d' ' -f1).lock"
+acquire_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || die "another sir instance is already running ($LOCK_FILE)"
+  fi
+}
+
 if [ "$#" -gt 0 ]; then
   case "$1" in
     --clean)
@@ -89,6 +109,7 @@ if [ "$#" -gt 0 ]; then
       exit 0
       ;;
     --test)
+      acquire_lock
       if ! detect_sdl2 && [ ! -d "$BUILD_DIR" ]; then
         # The test binary never links SDL, but CMake still needs SDL2 for the
         # `sir` target; resolve it (or instruct) before configuring.
@@ -100,6 +121,7 @@ if [ "$#" -gt 0 ]; then
       exec "$BUILD_DIR/sir_tests"
       ;;
     --sanitize)
+      acquire_lock
       CMAKE_ARGS+=("-DSIR_SANITIZE=ON")
       detect_sdl2 || die "SDL2 development files not found (see --install-deps / SIR_SDL2_PREFIX)"
       configure || die "CMake configuration failed (see errors above)"
@@ -117,6 +139,7 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
+acquire_lock
 detect_sdl2 || die "SDL2 development files not found. Run ./run.sh --install-deps, or set SIR_SDL2_PREFIX to an extracted libsdl2-dev tree."
 configure || die "CMake configuration failed (see errors above)"
 build || die "build failed"
