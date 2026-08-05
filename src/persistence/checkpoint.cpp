@@ -73,7 +73,7 @@ class Reader {
   }
   bool bytes(void* out, size_t n) {
     if (pos_ + n > n_) return false;
-    std::memcpy(out, p_ + pos_, n);
+    if (n > 0) std::memcpy(out, p_ + pos_, n);  // memcpy(nullptr,_,0) is UB
     pos_ += n;
     return true;
   }
@@ -414,6 +414,7 @@ bool CheckpointStore::save(const AgentState& state) {
 }
 
 LoadResult CheckpointStore::load(AgentState* out) {
+  bool saw_incompatible = false;
   if (fileExists(primary_)) {
     const LoadResult r = validateFile(primary_, cfg_, out, log_);
     if (r == LoadResult::Ok) {
@@ -421,6 +422,7 @@ LoadResult CheckpointStore::load(AgentState* out) {
       return LoadResult::Ok;
     }
     if (r == LoadResult::Incompatible) {
+      saw_incompatible = true;
       log_.warn("checkpoint topology incompatible with current config: " + primary_);
     } else {
       log_.warn("checkpoint corrupt; moving aside: " + primary_);
@@ -437,6 +439,7 @@ LoadResult CheckpointStore::load(AgentState* out) {
       return LoadResult::Ok;
     }
     if (r == LoadResult::Incompatible) {
+      saw_incompatible = true;
       log_.warn("backup checkpoint topology incompatible: " + backup_);
     } else {
       log_.warn("backup checkpoint corrupt; moving aside: " + backup_);
@@ -444,7 +447,8 @@ LoadResult CheckpointStore::load(AgentState* out) {
       ::rename(backup_.c_str(), (backup_ + suffix).c_str());
     }
   }
-  return LoadResult::Missing;
+  // Distinguish "nothing exists" from "exists but with a different topology".
+  return saw_incompatible ? LoadResult::Incompatible : LoadResult::Missing;
 }
 
 }  // namespace sir

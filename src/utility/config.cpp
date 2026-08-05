@@ -169,9 +169,9 @@ int Config::loadFromFile(const std::string& path, std::string* error,
     else if (k == "curiosity_reward_gain") setD(&curiosity_reward_gain);
     else if (k == "prediction_reward_gain") setD(&prediction_reward_gain);
     else if (k == "collapse_penalty") setD(&collapse_penalty);
-    else if (k == "scent_progress_reward_gain") {
-      setD(&scent_progress_reward_gain);
-      scent_progress_reward_gain = std::max(0.0, scent_progress_reward_gain);
+    else if (k == "scent_proximity_reward_gain") {
+      setD(&scent_proximity_reward_gain);
+      scent_proximity_reward_gain = std::max(0.0, scent_proximity_reward_gain);
     }
     // --- organism: prediction / curiosity ---
     else if (k == "prediction_loss_weight") setD(&prediction_loss_weight);

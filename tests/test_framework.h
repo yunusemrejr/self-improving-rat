@@ -1,76 +1,82 @@
 #pragma once
-// Tiny single-header test framework for sir_tests. No external dependencies.
-// Each test is a function returning bool (true = pass). A global registry is
-// built with static initializers; main() runs every registered test and
-// reports failures with a non-zero exit code.
+// Minimal dependency-free test framework for the Self Improving Rat test
+// suite. Tests never need SDL; they link against sir_core only.
 
+#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <functional>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace sir_test {
 
-// Set to true by a failing CHECK; reset per test by the runner. This makes
-// CHECK failures fail the enclosing test even if the return value is ignored.
-inline bool& failedFlag() {
-  static bool f = false;
-  return f;
-}
-
-struct Case {
+struct TestCase {
   const char* name;
-  std::function<bool()> fn;
+  void (*fn)();
 };
 
-inline std::vector<Case>& registry() {
-  static std::vector<Case> r;
+inline std::vector<TestCase>& registry() {
+  static std::vector<TestCase> r;
   return r;
 }
 
 struct Registrar {
-  Registrar(const char* name, std::function<bool()> fn) {
-    registry().push_back({name, std::move(fn)});
-  }
+  Registrar(const char* name, void (*fn)()) { registry().push_back({name, fn}); }
 };
 
-// Checks a condition and prints the failure message with file:line context.
-inline bool check(bool ok, const char* expr, const char* file, int line) {
-  if (!ok) {
-    failedFlag() = true;
-    std::fprintf(stderr, "    FAIL %s:%d: %s\n", file, line, expr);
-  }
-  return ok;
+inline int g_checks = 0;
+inline int g_failures = 0;
+
+inline void report_failure(const char* file, int line, const std::string& msg) {
+  ++g_failures;
+  std::printf("  FAIL %s:%d: %s\n", file, line, msg.c_str());
 }
 
-inline int runAll() {
-  int failed = 0;
+inline int runAll(const char* filter) {
   int ran = 0;
-  for (const Case& c : registry()) {
+  for (const auto& t : registry()) {
+    if (filter && filter[0] && !std::strstr(t.name, filter)) continue;
+    const int before = g_failures;
+    std::printf("== %s\n", t.name);
+    t.fn();
     ++ran;
-    failedFlag() = false;
-    c.fn();
-    const bool ok = !failedFlag();
-    std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", c.name);
-    if (!ok) ++failed;
+    if (g_failures != before) {
+      std::printf("   -> %d new failure(s)\n", g_failures - before);
+    }
   }
-  std::printf("\n%d/%d tests passed\n", ran - failed, ran);
-  return failed == 0 ? 0 : 1;
+  std::printf("\n%d test(s) run, %d check(s), %d failure(s)\n", ran, g_checks,
+              g_failures);
+  return g_failures == 0 ? 0 : 1;
 }
 
 }  // namespace sir_test
 
-#define CHECK(cond) ::sir_test::check((cond), #cond, __FILE__, __LINE__)
-#define CHECK_MSG(cond, msg)                                                  \
-  do {                                                                        \
-    if (!(cond)) {                                                            \
-      ::sir_test::failedFlag() = true;                                        \
-      std::fprintf(stderr, "    FAIL %s:%d: %s (%s)\n", __FILE__, __LINE__,   \
-                   #cond, (msg));                                             \
-    }                                                                         \
+#define CHECK(cond)                                                       \
+  do {                                                                    \
+    ++sir_test::g_checks;                                                 \
+    if (!(cond)) sir_test::report_failure(__FILE__, __LINE__, #cond);     \
   } while (0)
-#define TEST(name)                                                            \
-  static bool test_##name();                                                  \
-  static ::sir_test::Registrar reg_##name(#name, test_##name);                \
-  static bool test_##name()
+
+#define CHECK_MSG(cond, msg)                                              \
+  do {                                                                    \
+    ++sir_test::g_checks;                                                 \
+    if (!(cond)) sir_test::report_failure(__FILE__, __LINE__,             \
+                                          std::string(#cond) + " :: " + msg); \
+  } while (0)
+
+#define CHECK_NEAR(a, b, tol)                                             \
+  do {                                                                    \
+    ++sir_test::g_checks;                                                 \
+    const double va = (a), vb = (b);                                      \
+    if (!(std::fabs(va - vb) <= (tol))) {                                 \
+      char buf[160];                                                      \
+      std::snprintf(buf, sizeof(buf), "CHECK_NEAR(%s, %s): %.8g vs %.8g", \
+                    #a, #b, va, vb);                                      \
+      sir_test::report_failure(__FILE__, __LINE__, buf);                  \
+    }                                                                     \
+  } while (0)
+
+#define TEST(name)                                                        \
+  static void test_##name();                                              \
+  static ::sir_test::Registrar reg_##name(#name, &test_##name);           \
+  static void test_##name()

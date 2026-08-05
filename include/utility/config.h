@@ -12,18 +12,18 @@ struct Config {
   // Window / rendering
   int window_width = 960;
   int window_height = 640;
-  int maze_width = 47;
-  int maze_height = 31;
-  int tile_size = 13;
+  int maze_width = 13;
+  int maze_height = 9;
+  int tile_size = 24;
   int render_frames_per_second = 30;
   bool debug_display = false;
 
   // Simulation
   int sim_steps_per_second = 12;
-  double maze_braid_probability = 0.12;
+  double maze_braid_probability = 0.4;
   int maze_regenerate_every_cheeses = 6;
-  int min_cheese_distance = 12;
-  int sensory_radius = 6;
+  int min_cheese_distance = 3;
+  int sensory_radius = 20;   // cheese scent range in cells (covers the maze)
   int revisit_window_steps = 4;
 
   // Navigation rewards (fixed base)
@@ -75,11 +75,12 @@ struct Config {
   double curiosity_reward_gain = 0.02;
   double prediction_reward_gain = 0.01;
   double collapse_penalty = 0.01;
-  // Dense shaping from the rat's own scent perception: a signed reward for
-  // the change in the strongest scent direction (max scent channel) between
-  // the pre- and post-action observation. Teaches gradient-following toward
-  // the cheese without revealing any hidden information.
-  double scent_progress_reward_gain = 0.02;
+  // Dense shaping from the rat's own scent perception: a bonus proportional
+  // to the strongest scent channel after the action (rewarding being near the
+  // cheese). Unlike a delta form it does not punish the detours a maze
+  // requires, so the value function develops a gradient toward the cheese
+  // that transfers across cheese re-placements.
+  double scent_proximity_reward_gain = 0.08;
 
   // --- Organism: prediction / curiosity ---
   double prediction_loss_weight = 0.3;

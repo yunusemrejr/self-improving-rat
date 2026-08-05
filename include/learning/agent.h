@@ -34,6 +34,7 @@ class Agent {
   int rnnSize() const { return cfg_.rnn_hidden; }
   int policyOut() const { return 4; }
   int predOut() const { return 16; }
+  int paramCount() const { return online_.paramCount(); }
   static int predOutStatic() { return 16; }
 
   // --- decision (epsilon-greedy over online Q(obs, h); advances h_) ---

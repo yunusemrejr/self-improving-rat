@@ -42,6 +42,7 @@ int Application::run(const Options& opts) {
   }
   // Environment seed override (SIR_SEED) wins over the config file.
   if (opts.seed_override != 0) cfg_.seed = opts.seed_override;
+  debug_ = cfg_.debug_display;  // config default for the diagnostics panel
 
   // --- directories + logger ---
   try {
@@ -311,9 +312,19 @@ void Application::saveCheckpointNow(const char* reason) {
 }
 
 void Application::doSimStep() {
-  // Phase 1: observe + decide (recurrent state advances inside the agent).
-  const float* s = sim_->observe();
-  const float* h_prev = agent_->recurrentState();
+  // Phase 1: observe + decide. NOTE: sim.observe() and agent.recurrentState()
+  // return pointers into internal buffers that are mutated by the following
+  // calls (sim.step() shifts the frame history; selectAction() advances the
+  // recurrent state). Copy both into locals so the stored transition is the
+  // true pre-action state (aliasing fix).
+  std::vector<float> s_local(agent_->inputSize());
+  std::copy(sim_->observe(), sim_->observe() + agent_->inputSize(),
+            s_local.begin());
+  std::vector<float> h_prev_local(agent_->rnnSize());
+  std::copy(agent_->recurrentState(),
+            agent_->recurrentState() + agent_->rnnSize(), h_prev_local.begin());
+  const float* s = s_local.data();
+  const float* h_prev = h_prev_local.data();
   const Agent::Decision d = agent_->selectAction(s);
   const int action = static_cast<int>(d.action);
   // Episode length: steps since the previous cheese, including this step.
@@ -344,16 +355,15 @@ void Application::doSimStep() {
       (0.5 + 0.5 * ha.curiosity_need);
   const double pred_bonus =
       cfg_.prediction_reward_gain * (1.0 - agent_->uncertainty());
-  // Scent-progress shaping: signed change in the strongest scent channel
-  // (newest observation frame = current sensory state). Derived only from
-  // the rat's own perception; rewards approaching the cheese gradient.
+  // Scent-proximity shaping: bonus proportional to the strongest scent
+  // channel after the action (newest observation frame = current sensory
+  // state). Derived only from the rat's own perception; rewards being near
+  // the cheese and transfers across cheese re-placements.
   const int last_frame = (cfg_.observation_frames - 1) * kObservationBase;
-  const float scent_before = std::max(
-      {s[last_frame + 8], s[last_frame + 9], s[last_frame + 10], s[last_frame + 11]});
   const float scent_after = std::max(
       {s2[last_frame + 8], s2[last_frame + 9], s2[last_frame + 10], s2[last_frame + 11]});
-  const double scent_progress =
-      cfg_.scent_progress_reward_gain * static_cast<double>(scent_after - scent_before);
+  const double scent_proximity =
+      cfg_.scent_proximity_reward_gain * static_cast<double>(scent_after);
   double collapse = 0.0;
   if (metrics_.actionEntropy() < 0.2 && metrics_.recentAvgReward() < -0.05 &&
       sim_->lifetimeSteps() > 1000) {
@@ -361,7 +371,7 @@ void Application::doSimStep() {
   }
   const float r_total = static_cast<float>(
       clampd(static_cast<double>(reward_ext) + curiosity + pred_bonus +
-                 scent_progress + collapse,
+                 scent_proximity + collapse,
              -12.0, 12.0));
 
   // Phase 5: learn + remember.

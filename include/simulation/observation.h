@@ -17,7 +17,7 @@ namespace sir {
 //
 // Layout of one base frame (30 channels, all in [0,1]):
 //   [0..7]   wall bits: N, NE, E, SE, S, SW, W, NW       (1 = blocked)
-//   [8..11]  cheese scent: N, E, S, W                    (0..1)
+//   [8..11]  cheese scent: Up, Down, Left, Right (action-aligned)  (0..1)
 //   [12..15] last action one-hot: Up, Down, Left, Right
 //   [16]     wall-hit flag of the last action
 //   [17]     revisit signal (1 - steps_since_last_visit / 8)

@@ -198,8 +198,8 @@ void Renderer::drawPanel(const PanelData& p) {
   int y = 8;
   const int scale = 2;
   auto row = [&](const std::string& text, bool hi = false) {
-    drawText(x, y, text, scale, hi ? kTextHi.r : kTextHi.g,
-             hi ? kTextHi.g : kTextHi.g, hi ? kTextHi.b : kTextHi.b);
+    drawText(x, y, text, scale, hi ? kTextHi.r : kText.r,
+             hi ? kTextHi.g : kText.g, hi ? kTextHi.b : kText.b);
     y += 14;
   };
   row("MAZE " + formatInt(p.maze_generations) + "  CHEESE " + formatInt(p.cheese_total), true);

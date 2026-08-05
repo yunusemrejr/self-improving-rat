@@ -57,7 +57,7 @@ class Application {
   Renderer renderer_;
 
   bool paused_ = false;
-  bool debug_ = false;
+  bool debug_ = false;  // initialized from cfg.debug_display in run()
   bool consolidating_ = false;
   int consolidation_steps_left_ = 0;
   int consolidation_ops_left_ = 0;
