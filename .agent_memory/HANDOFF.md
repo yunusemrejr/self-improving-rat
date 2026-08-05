@@ -1,5 +1,19 @@
 # HANDOFF — Self Improving Rat (master handoff, 2026-08-04)
 
+> **STATUS UPDATE (2026-08-05, verification pass):** Everything in the
+> "NOT YET WRITTEN" / "NEXT SESSION" lists below is now implemented and
+> verified: CMakeLists.txt, run.sh, src/main.cpp, tests/ (47 tests, all
+> passing under Release and ASan+UBSan), README.md, and config/default.cfg
+> (all organism keys). The design details below remain accurate except:
+> the observation vector is now **30 channels** (28 + 2 proprioception
+> position channels added during verification), the episodic per-entry
+> layout is now `input*2 + rnn + 3` (reward_ext added), and several bugs
+> were fixed (checkpoint magic-skip + utility count serialization,
+> RingBuffer push/index convention, utility-trace gradient indexing,
+> null-pred guard, prediction-loss weight, metrics). See
+> `.agent_memory/GENERAL_PROGRESS.md` for the verified record. First commit:
+> `370a58f`.
+
 **Project root:** `/home/yemre/Desktop/self-improving-rat`
 **Objective:** Ubuntu-native C++20/CMake/SDL2 desktop app: a persistent artificial-life
 rat (RL + homeostasis + world model + recurrent memory + episodic memory + plasticity +
