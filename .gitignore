@@ -1,0 +1,19 @@
+# Build output (regenerable, managed by run.sh)
+build/
+build-*/
+
+# Local dependency extraction used only for offline verification builds
+.deps/
+
+# Runtime data (checkpoints and logs are generated, never committed)
+data/checkpoints/*.sir
+data/checkpoints/*.sir.bak
+data/checkpoints/*.tmp
+data/checkpoints/*.bad
+data/logs/*.log
+data/logs/*.log.1
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
