@@ -10,6 +10,9 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <filesystem>
+#include "learning/replay_buffer.h"
 
 namespace sir {
 
@@ -92,7 +95,7 @@ class Reader {
 };
 
 constexpr char kMagic[] = "SIRCPT";
-constexpr uint32_t kFormatVersion = 2;
+constexpr uint32_t kFormatVersion = 3;
 constexpr size_t kMaxFileBytes = 64 * 1024 * 1024;  // sanity cap
 
 bool fileExists(const std::string& path) {
@@ -142,7 +145,7 @@ namespace {
 std::vector<uint8_t> serializeState(const AgentState& s) {
   Buf b;
   b.bytes(kMagic, 6);
-  b.bytes("02", 2);
+  b.bytes("03", 2);
   b.u32(kFormatVersion);
   b.u32(static_cast<uint32_t>(s.input));
   b.u32(static_cast<uint32_t>(s.rnn));
@@ -215,6 +218,11 @@ std::vector<uint8_t> serializeState(const AgentState& s) {
   b.u32(static_cast<uint32_t>(s.utility.size()));
   b.f32_vec(s.utility);
 
+  b.u32(static_cast<uint32_t>(s.replay_floats.size()));
+  b.f32_vec(s.replay_floats);
+  b.u32(static_cast<uint32_t>(s.replay_meta.size()));
+  b.u32_vec(s.replay_meta);
+
   // Checksum over everything written so far.
   const uint64_t checksum = CheckpointStore::fnv1a64(b.data().data(), b.data().size());
   b.u64(checksum);
@@ -226,7 +234,15 @@ LoadResult deserializeState(const std::vector<uint8_t>& bytes, const Config& cfg
                             AgentState* out) {
   if (bytes.size() < 96) return LoadResult::Corrupt;
   if (bytes.size() > kMaxFileBytes) return LoadResult::Corrupt;
-  if (bytes.size() < 8 || std::memcmp(bytes.data(), "SIRCPT02", 8) != 0) return LoadResult::Corrupt;
+  if (std::memcmp(bytes.data(), "SIRCPT", 6) != 0) return LoadResult::Corrupt;
+  const bool v2 = std::memcmp(bytes.data(), "SIRCPT02", 8) == 0;
+  const bool v3 = std::memcmp(bytes.data(), "SIRCPT03", 8) == 0;
+  if (!v2 && !v3) return LoadResult::Incompatible;
+  // Check integrity before interpreting lengths or allocating vectors.
+  Reader checksum_reader(bytes.data() + bytes.size() - 8, 8);
+  uint64_t checksum;
+  if (!checksum_reader.u64(&checksum) || checksum !=
+      CheckpointStore::fnv1a64(bytes.data(), bytes.size() - 8)) return LoadResult::Corrupt;
 
   Reader r(bytes.data(), bytes.size());
   // Skip the 8-byte magic before reading the version field (the writer
@@ -235,7 +251,7 @@ LoadResult deserializeState(const std::vector<uint8_t>& bytes, const Config& cfg
   if (!r.skip(8)) return LoadResult::Corrupt;
   uint32_t version;
   if (!r.u32(&version)) return LoadResult::Corrupt;
-  if (version > kFormatVersion) return LoadResult::Corrupt;  // newer than us
+  if (version != (v2 ? 2u : 3u)) return LoadResult::Corrupt;
 
   AgentState s;
   uint32_t v;
@@ -283,8 +299,9 @@ LoadResult deserializeState(const std::vector<uint8_t>& bytes, const Config& cfg
 
   uint32_t ep_cap, ep_count, ep_floats_n, ep_meta_n;
   if (!r.u32(&ep_cap) || !r.u32(&ep_count) || !r.u32(&ep_floats_n)) return LoadResult::Corrupt;
-  if (ep_count > ep_cap || ep_floats_n != ep_count * per_entry_floats) return LoadResult::Corrupt;
+  if (ep_count > ep_cap || ep_cap > (1u << 14) || ep_floats_n != ep_count * per_entry_floats) return LoadResult::Corrupt;
   s.episodic_capacity = ep_cap;
+  if (ep_floats_n > (bytes.size() - r.pos()) / 4) return LoadResult::Corrupt;
   s.episodic_floats.resize(ep_floats_n);
   if (!r.bytes(s.episodic_floats.data(), ep_floats_n * 4)) return LoadResult::Corrupt;
   if (!r.u32(&ep_meta_n)) return LoadResult::Corrupt;
@@ -322,6 +339,21 @@ LoadResult deserializeState(const std::vector<uint8_t>& bytes, const Config& cfg
   s.utility.resize(util_n);
   if (!r.bytes(s.utility.data(), util_n * 4)) return LoadResult::Corrupt;
 
+  if (version >= 3) {
+    uint32_t nf, nm;
+    const size_t stride = static_cast<size_t>(s.input) * 2 + s.rnn + 6;
+    if (!r.u32(&nf) || nf % stride || nf / stride > 65536 ||
+        nf > (bytes.size() - r.pos()) / 4) return LoadResult::Corrupt;
+    s.replay_floats.resize(nf);
+    if (!r.bytes(s.replay_floats.data(), static_cast<size_t>(nf) * 4) ||
+        !r.u32(&nm) || nm != nf / stride * 2) return LoadResult::Corrupt;
+    s.replay_meta.resize(nm);
+    if (!r.bytes(s.replay_meta.data(), static_cast<size_t>(nm) * 4)) return LoadResult::Corrupt;
+    // Enforce action/flag/priority validity even for callers that only validate.
+    ReplayBuffer probe(s.input, s.rnn, 1);
+    if (!probe.restoreFrom(s.replay_floats, s.replay_meta)) return LoadResult::Corrupt;
+  }
+
   // Checksum covers everything up to this point.
   const uint64_t stored_checksum_pos = r.pos();
   uint64_t stored;
@@ -332,6 +364,7 @@ LoadResult deserializeState(const std::vector<uint8_t>& bytes, const Config& cfg
   if (computed != stored) return LoadResult::Corrupt;
 
   if (!s.allFinite()) return LoadResult::Corrupt;
+  for (float v_adam : s.adam_v) if (v_adam < 0) return LoadResult::Corrupt;
   // RNG state must round-trip (defensive).
   Rng probe(s.seed);
   if (!s.rng_state.empty() && !probe.restoreState(s.rng_state)) return LoadResult::Corrupt;
@@ -371,11 +404,31 @@ bool CheckpointStore::writeAtomic(const AgentState& state) {
     return false;
   }
   const size_t written = fwrite(bytes.data(), 1, bytes.size(), f);
-  if (written != bytes.size() || fflush(f) != 0 ||
-      fsync(fileno(f)) != 0 || fclose(f) != 0) {
-    log_.error("checkpoint write failed (disk full?): " + tmp);
+  bool ok = written == bytes.size();
+  if (fflush(f) != 0) ok = false;
+  if (fsync(fileno(f)) != 0) ok = false;
+  if (fclose(f) != 0) ok = false; // always close, including error paths
+  AgentState verified;
+  if (!ok || validateFile(tmp, cfg_, &verified, log_) != LoadResult::Ok) {
+    log_.error("checkpoint temp file failed write or validation: " + tmp);
     ::remove(tmp.c_str());
     return false;
+  }
+  // Never replace a future/incompatible organism when saving a fresh one.
+  if (fileExists(primary_)) {
+    AgentState existing;
+    const auto result = validateFile(primary_, cfg_, &existing, log_);
+    if (result == LoadResult::Incompatible) {
+      log_.error("checkpoint save refused: preserve incompatible organism; use another checkpoint_dir");
+      ::remove(tmp.c_str());
+      return false;
+    }
+    if (result != LoadResult::Ok) {
+      // Keep the last valid backup instead of promoting a corrupt primary.
+      if (::rename(primary_.c_str(), (primary_ + ".bad").c_str()) != 0) {
+        ::remove(tmp.c_str()); return false;
+      }
+    }
   }
 
   // Promote the current valid checkpoint to backup, then install the new one.
@@ -404,6 +457,11 @@ bool CheckpointStore::writeAtomic(const AgentState& state) {
     else ::remove(primary_.c_str());
     return false;
   }
+  const int dirfd = ::open(cfg_.checkpoint_dir.c_str(), O_RDONLY | O_DIRECTORY);
+  if (dirfd < 0) { log_.error("cannot open checkpoint directory for fsync"); return false; }
+  const int synced = ::fsync(dirfd);
+  ::close(dirfd);
+  if (synced != 0) { log_.error("checkpoint directory fsync failed"); return false; }
   return true;
 }
 

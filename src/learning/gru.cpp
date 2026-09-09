@@ -82,13 +82,35 @@ const float* GruLayer::denseWeightPtr(size_t dense_offset) const {
   return const_cast<GruLayer*>(this)->denseWeightPtr(dense_offset);
 }
 
+void GruLayer::ensureScratch() const {
+  const int h = h_;
+  fz_.resize(h);
+  fr_.resize(h);
+  fc_.resize(h);
+  bz2_.resize(h);
+  br2_.resize(h);
+  bc2_.resize(h);
+  baz_.resize(h);
+  bar_.resize(h);
+  bac_.resize(h);
+  bdc_.resize(h);
+  bdz_.resize(h);
+  bda_.resize(h);
+  bdr_.resize(h);
+  bdlz_.resize(h);
+  bdlr_.resize(h);
+}
+
 void GruLayer::forward(const float* x, const float* h_prev, float* h_out) const {
+  ensureScratch();
   const int in = in_, h = h_;
+  std::vector<float>& z = fz_;
+  std::vector<float>& r = fr_;
+  std::vector<float>& c = fc_;
   // z = sigmoid(Wz x + Uz h_prev + bz)
   // r = sigmoid(Wr x + Ur h_prev + br)
   // c = tanh(Wh x + Uh (r * h_prev) + bh)
   // h = (1 - z) * h_prev + z * c
-  std::vector<float> z(h), r(h), c(h);
   for (int j = 0; j < h; ++j) {
     float az = bz_[j], ar = br_[j], ac = bh_[j];
     for (int i = 0; i < in; ++i) {
@@ -117,11 +139,18 @@ void GruLayer::forward(const float* x, const float* h_prev, float* h_out) const 
 }
 
 void GruLayer::backward(const float* x, const float* h_prev, const float* h_out,
-                        const float* grad_h, float* grad_p) const {
+                        const float* grad_h, float* grad_p,
+                        float* grad_h_prev) const {
   (void)h_out;  // forward pass is recomputed deterministically
+  ensureScratch();
   const int in = in_, h = h_;
   // Recompute forward intermediates (deterministic).
-  std::vector<float> z(h), r(h), c(h), az(h), ar(h), ac(h);
+  std::vector<float>& z = bz2_;
+  std::vector<float>& r = br2_;
+  std::vector<float>& c = bc2_;
+  std::vector<float>& az = baz_;
+  std::vector<float>& ar = bar_;
+  std::vector<float>& ac = bac_;
   for (int j = 0; j < h; ++j) {
     az[j] = bz_[j];
     ar[j] = br_[j];
@@ -146,7 +175,12 @@ void GruLayer::backward(const float* x, const float* h_prev, const float* h_out,
   }
 
   // dL/dc, dL/dz
-  std::vector<float> dc(h), dz(h), da(h), dr(h), dlz(h), dlr(h);
+  std::vector<float>& dc = bdc_;
+  std::vector<float>& dz = bdz_;
+  std::vector<float>& da = bda_;
+  std::vector<float>& dr = bdr_;
+  std::vector<float>& dlz = bdlz_;
+  std::vector<float>& dlr = bdlr_;
   for (int j = 0; j < h; ++j) {
     dc[j] = z[j] * grad_h[j];
     dz[j] = (c[j] - h_prev[j]) * grad_h[j];
@@ -164,6 +198,22 @@ void GruLayer::backward(const float* x, const float* h_prev, const float* h_out,
   for (int j = 0; j < h; ++j) {
     dlz[j] = dz[j] * z[j] * (1.0f - z[j]);
     dlr[j] = dr[j] * r[j] * (1.0f - r[j]);
+  }
+
+  // Gradient w.r.t. h_prev (full recurrent flow; see gru.h for the formula).
+  // Weight layout: u_[k*h+j] connects recurrent unit k to gate j (see the
+  // parameter-gradient loops below), so the transpose sums iterate gate j
+  // over the per-unit weights.
+  if (grad_h_prev) {
+    for (int k = 0; k < h; ++k) {
+      float s = grad_h[k] * (1.0f - z[k]);
+      for (int j = 0; j < h; ++j) {
+        s += uz_[static_cast<size_t>(k) * h + j] * dlz[j];
+        s += ur_[static_cast<size_t>(k) * h + j] * dlr[j];
+        s += uh_[static_cast<size_t>(k) * h + j] * da[j] * r[k];
+      }
+      grad_h_prev[k] = s;
+    }
   }
 
   // Accumulate gradients into grad_p (layout order: Wz, Uz, bz, Wr, Ur, br,

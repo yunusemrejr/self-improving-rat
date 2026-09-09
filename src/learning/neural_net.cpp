@@ -139,7 +139,7 @@ bool NeuralNet::allFinite() const {
 void NeuralNet::forward(const float* x, const float* h_prev, float* h_out,
                         float* q, float* pred) const {
   gru_.forward(x, h_prev, h_out);
-  for (int k = 0; k < po_; ++k) {
+  if (q) for (int k = 0; k < po_; ++k) {
     float s = bq_[k];
     for (int j = 0; j < rnn_; ++j)
       s += wq_[static_cast<size_t>(j) * po_ + k] * h_out[j];
@@ -157,24 +157,32 @@ void NeuralNet::forward(const float* x, const float* h_prev, float* h_out,
 
 void NeuralNet::backward(const float* x, const float* h_prev, float* h_out,
                          const float* grad_q, const float* grad_pred,
-                         float* grad_p) const {
+                         float* grad_p, float* grad_h_prev,
+                         const float* grad_h_extra) const {
   // Recompute the forward pass (deterministic) including predictions so the
   // sigmoid chain rule can be applied exactly.
-  std::vector<float> q(po_), pred(pr_);
+  scratch_q_.resize(po_);
+  scratch_pred_.resize(pr_);
+  scratch_dp_.resize(pr_);
+  scratch_grad_h_.assign(rnn_, 0.0f);
+  std::vector<float>& q = scratch_q_;
+  std::vector<float>& pred = scratch_pred_;
   forward(x, h_prev, h_out, q.data(), pred.data());
 
   // Prediction head: grad_pred is dL/d(pred_output); pre-activation gradient
   // is grad_pred * pred * (1 - pred).
-  std::vector<float> dp(pr_);
+  std::vector<float>& dp = scratch_dp_;
   for (int k = 0; k < pr_; ++k) dp[k] = grad_pred[k] * pred[k] * (1.0f - pred[k]);
 
-  // Gradient w.r.t. the hidden state from both heads.
-  std::vector<float> grad_h(rnn_, 0.0f);
+  // Gradient w.r.t. the hidden state from both heads (plus an optional
+  // future-step flow when unrolling multiple steps; see grad_h_extra).
+  std::vector<float>& grad_h = scratch_grad_h_;
   for (int j = 0; j < rnn_; ++j) {
     for (int k = 0; k < po_; ++k)
       grad_h[j] += wq_[static_cast<size_t>(j) * po_ + k] * grad_q[k];
     for (int k = 0; k < pr_; ++k)
       grad_h[j] += wp_[static_cast<size_t>(j) * pr_ + k] * dp[k];
+    if (grad_h_extra) grad_h[j] += grad_h_extra[j];
   }
 
   // Head parameter gradients (dense layout, after the GRU block).
@@ -193,8 +201,18 @@ void NeuralNet::backward(const float* x, const float* h_prev, float* h_out,
   o += static_cast<size_t>(rnn_) * pr_;
   std::copy(dp.begin(), dp.end(), grad_p + o);
 
-  // GRU parameter gradients (h_prev treated as a constant; truncated BPTT).
-  gru_.backward(x, h_prev, h_out, grad_h.data(), grad_p);
+  // GRU parameter gradients. Single-step callers (grad_h_prev == nullptr)
+  // keep the documented truncated-BPTT(1) semantics; unrolled callers
+  // receive the recurrent gradient w.r.t. h_prev to continue the chain.
+  gru_.backward(x, h_prev, h_out, grad_h.data(), grad_p, grad_h_prev);
+  maskDense(grad_p);
+}
+
+void NeuralNet::maskDense(float* dense) const {
+  const Layout layout = layoutOf(in_, rnn_, po_, pr_);
+  for (size_t i = 0; i < layout.weights_total; ++i)
+    if (!(mask_[i / 8] & (1u << (i % 8))))
+      dense[weightToDense(i, rnn_, po_, layout)] = 0.0f;
 }
 
 void NeuralNet::getMask(uint8_t* out) const {
@@ -221,7 +239,6 @@ void NeuralNet::updateUtility(const float* grad, double decay) {
   // gradient buffer uses the dense parameter layout (biases interleaved).
   // Walk the weight-index space and fetch each weight's dense gradient via
   // weightToDense; never interpret a bias offset as a weight index.
-  std::fill(utility_.begin(), utility_.end(), 0.0f);
   for (size_t i = 0; i < L.weights_total; ++i) {
     const bool active = (mask_[i / 8] & (1u << (i % 8))) != 0;
     if (!active) continue;

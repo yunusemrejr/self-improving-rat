@@ -1,4 +1,5 @@
 #include "utility/config.h"
+#include <algorithm>
 
 #include <cctype>
 #include <cmath>
@@ -141,7 +142,23 @@ int Config::loadFromFile(const std::string& path, std::string* error,
     else if (k == "gradient_clip_norm") {
       setD(&gradient_clip_norm);
       gradient_clip_norm = std::max(1e-6, gradient_clip_norm);
-    }
+    } else if (k == "n_step_returns") setInt(&n_step_returns, 1, 8);
+    else if (k == "td_huber_delta") {
+      setD(&td_huber_delta);
+      td_huber_delta = std::max(0.01, std::min(100.0, td_huber_delta));
+    } else if (k == "per_is_beta") {
+      setD(&per_is_beta);
+      per_is_beta = std::max(0.0, std::min(1.0, per_is_beta));
+    } else if (k == "per_priority_alpha") {
+      setD(&per_priority_alpha);
+      per_priority_alpha = std::clamp(per_priority_alpha, 0.0, 1.0);
+    } else if (k == "episodic_action_bonus") {
+      setD(&episodic_action_bonus);
+      episodic_action_bonus = std::clamp(episodic_action_bonus, 0.0, 2.0);
+    } else if (k == "mask_wall_actions") setB(&mask_wall_actions);
+    else if (k == "replay_burn_in") setInt(&replay_burn_in, 0, 16);
+    else if (k == "sequence_train_interval") setInt(&sequence_train_interval, 0, 4096);
+    else if (k == "bptt_chunk_len") setInt(&bptt_chunk_len, 0, 8);
     // --- organism: homeostasis ---
     else if (k == "energy_cost_step") setD(&energy_cost_step);
     else if (k == "energy_cost_move") setD(&energy_cost_move);

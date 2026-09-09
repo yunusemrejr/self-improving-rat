@@ -80,6 +80,12 @@ class Application {
   int steps_since_sps_ = 0;
   std::vector<float> recent_obs_;  // ring for plasticity evaluation
   int recent_obs_head_ = 0;
+  // Reusable per-step snapshots (doSimStep): pre-action observation and
+  // recurrent state, copied out before the mutating sim/agent calls so the
+  // stored transition is the true pre-action state. Reused across steps to
+  // avoid per-step heap allocation (single-threaded loop).
+  std::vector<float> step_obs_;
+  std::vector<float> step_h_prev_;
   bool screenshot_done_ = false;
   int frames_rendered_ = 0;
 };

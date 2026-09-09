@@ -4,23 +4,59 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
+#include <array>
 
 namespace sir {
 
 namespace {
 
-// Monochrome palette (restrained, no bright colors).
-constexpr SDL_Color kBg = {0x14, 0x14, 0x14, 0xFF};      // charcoal
-constexpr SDL_Color kWall = {0x3a, 0x3a, 0x3a, 0xFF};    // dark gray
-constexpr SDL_Color kFloor = {0x56, 0x56, 0x56, 0xFF};   // medium gray
-constexpr SDL_Color kRat = {0xd8, 0xd8, 0xd8, 0xFF};     // light gray
-constexpr SDL_Color kRatRest = {0x9a, 0x9a, 0x9a, 0xFF};
-constexpr SDL_Color kNose = {0x14, 0x14, 0x14, 0xFF};
-constexpr SDL_Color kCheese = {0xb0, 0xb0, 0xb0, 0xFF};  // muted off-white
-constexpr SDL_Color kCheeseNotch = {0x8c, 0x8c, 0x8c, 0xFF};
-constexpr SDL_Color kText = {0x99, 0x99, 0x99, 0xFF};
-constexpr SDL_Color kTextHi = {0xcc, 0xcc, 0xcc, 0xFF};
-constexpr SDL_Color kPanelBg = {0x1c, 0x1c, 0x1c, 0xFF};
+// Warm habitat, neutral grey fur, and a single golden food accent.
+constexpr SDL_Color kBg = {24, 31, 33, 255};
+constexpr SDL_Color kWall = {42, 53, 55, 255};
+constexpr SDL_Color kFloor = {219, 211, 190, 255};
+constexpr SDL_Color kText = {164, 181, 180, 255};
+constexpr SDL_Color kTextHi = {235, 237, 225, 255};
+constexpr SDL_Color kGold = {244, 192, 74, 255};
+
+void color(SDL_Renderer* r, SDL_Color c) {
+  SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
+}
+void ellipse(SDL_Renderer* r, int x, int y, int rx, int ry, SDL_Color c) {
+  color(r, c);
+  rx = std::max(1, rx); ry = std::max(1, ry);
+  for (int dy = -ry; dy <= ry; ++dy) {
+    const int dx = static_cast<int>(std::round(rx * std::sqrt(
+        std::max(0.0, 1.0 - double(dy * dy) / double(ry * ry)))));
+    SDL_RenderDrawLine(r, x - dx, y + dy, x + dx, y + dy);
+  }
+}
+void rounded(SDL_Renderer* r, int x, int y, int w, int h, int radius, SDL_Color c) {
+  radius = std::max(0, std::min({radius, w / 2, h / 2}));
+  color(r, c);
+  SDL_Rect core{x + radius, y, w - radius * 2, h};
+  SDL_RenderFillRect(r, &core);
+  core = {x, y + radius, w, h - radius * 2}; SDL_RenderFillRect(r, &core);
+  for (int dx : {radius, w - radius - 1})
+    for (int dy : {radius, h - radius - 1})
+      ellipse(r, x + dx, y + dy, radius, radius, c);
+}
+void polygon(SDL_Renderer* r, const std::vector<SDL_Point>& points, SDL_Color c) {
+  int top = points[0].y, bottom = top;
+  for (auto p : points) { top = std::min(top, p.y); bottom = std::max(bottom, p.y); }
+  color(r, c);
+  for (int y = top; y <= bottom; ++y) {
+    std::vector<int> cuts;
+    for (size_t i = 0; i < points.size(); ++i) {
+      auto a = points[i], b = points[(i + 1) % points.size()];
+      if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y))
+        cuts.push_back(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+    }
+    std::sort(cuts.begin(), cuts.end());
+    for (size_t i = 1; i < cuts.size(); i += 2)
+      SDL_RenderDrawLine(r, cuts[i - 1], y, cuts[i], y);
+  }
+}
 
 std::string formatInt(int64_t v) { return std::to_string(v); }
 
@@ -43,18 +79,24 @@ std::string formatDuration(uint64_t seconds) {
 }  // namespace
 
 bool Renderer::init(const Config& cfg, std::string* err) {
-  tile_ = cfg.tile_size;
+  width_ = std::max(cfg.window_width, cfg.maze_width + 56);
+  height_ = std::max(cfg.window_height, cfg.maze_height + 216);
+  // Fit all supported mazes into the actual window without clipping.
+  maze_y_ = height_ < 400 ? 82 : 118;
+  const int reserve = width_ >= 900 ? 350 : 0;
+  tile_ = std::max(1, std::min({cfg.tile_size, (width_ - 56 - reserve) / cfg.maze_width,
+                               (height_ - maze_y_ - 82) / cfg.maze_height}));
   maze_px_w_ = cfg.maze_width * tile_;
   maze_px_h_ = cfg.maze_height * tile_;
-  panel_x_ = maze_x_ + maze_px_w_ + 16;
+  panel_x_ = maze_x_ + maze_px_w_ + 30;
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     if (err) *err = std::string("SDL_Init failed: ") + SDL_GetError();
     return false;
   }
   win_ = SDL_CreateWindow("Self Improving Rat", SDL_WINDOWPOS_CENTERED,
-                          SDL_WINDOWPOS_CENTERED, cfg.window_width,
-                          cfg.window_height, SDL_WINDOW_SHOWN);
+                          SDL_WINDOWPOS_CENTERED, width_,
+                          height_, SDL_WINDOW_SHOWN);
   if (!win_) {
     if (err) *err = std::string("SDL_CreateWindow failed: ") + SDL_GetError();
     SDL_Quit();
@@ -109,130 +151,160 @@ void Renderer::drawText(int x, int y, const std::string& text, int scale,
 
 void Renderer::drawMaze(const Simulation& sim) {
   const Maze& maze = sim.maze();
+  rounded(ren_, maze_x_ - 10, maze_y_ - 10, maze_px_w_ + 20, maze_px_h_ + 20,
+          16, kWall);
+  const int inset = std::max(0, tile_ / 10);
   for (int y = 0; y < maze.height(); ++y) {
     for (int x = 0; x < maze.width(); ++x) {
-      const bool wall = maze.isWall(x, y);
-      fillRect(maze_x_ + x * tile_, maze_y_ + y * tile_, tile_, tile_,
-               wall ? kWall.r : kFloor.r, wall ? kWall.g : kFloor.g,
-               wall ? kWall.b : kFloor.b);
+      if (maze.isWall(x, y)) continue;
+      const int px = maze_x_ + x * tile_, py = maze_y_ + y * tile_;
+      rounded(ren_, px + inset, py + inset, tile_ - 2 * inset, tile_ - 2 * inset,
+              tile_ / 5, kFloor);
+      if (!maze.isWall(x + 1, y))
+        fillRect(px + tile_ / 2, py + inset, tile_, tile_ - 2 * inset,
+                 kFloor.r, kFloor.g, kFloor.b);
+      if (!maze.isWall(x, y + 1))
+        fillRect(px + inset, py + tile_ / 2, tile_ - 2 * inset, tile_,
+                 kFloor.r, kFloor.g, kFloor.b);
     }
   }
 }
 
 void Renderer::drawCheese(const Simulation& sim) {
   for (const Position& c : sim.cheeses()) {
-    const int px = maze_x_ + c.x * tile_;
-    const int py = maze_y_ + c.y * tile_;
-    const int body = std::max(4, tile_ - 5);
-    // Cheese block with a bite (notch) in the top-right corner.
-    fillRect(px + 2, py + 2, body, body, kCheese.r, kCheese.g, kCheese.b);
-    const int notch = std::max(2, body / 3);
-    fillRect(px + 2 + body - notch, py + 2, notch, notch, kCheeseNotch.r,
-             kCheeseNotch.g, kCheeseNotch.b);
+    const float unit = tile_ / 40.0f;
+    const int cx = maze_x_ + c.x * tile_ + tile_ / 2;
+    const int cy = maze_y_ + c.y * tile_ + tile_ / 2;
+    auto p = [&](float x, float y) { return SDL_Point{cx + int(x * unit), cy + int(y * unit)}; };
+    auto hole = [&](float x, float y, float rx, float ry) {
+      auto q = p(x, y);
+      ellipse(ren_, q.x, q.y, int(rx * unit), int(ry * unit), {190, 119, 24, 255});
+      ellipse(ren_, q.x + std::max(1, int(unit)), q.y + std::max(1, int(unit)),
+              int(rx * unit * .65f), int(ry * unit * .55f), {238, 165, 43, 255});
+    };
+    ellipse(ren_, cx, cy + int(12 * unit), int(15 * unit), int(4 * unit), {167, 157, 136, 255});
+    // Three faces of a Swiss-cheese wedge, including its amber rind.
+    polygon(ren_, {p(-15,-4), p(5,-14), p(16,0), p(16,10), p(-15,11)}, {147, 96, 26, 255});
+    polygon(ren_, {p(-14,-3), p(15,0), p(15,9), p(-14,10)}, {246, 181, 47, 255});
+    polygon(ren_, {p(-14,-4), p(5,-13), p(15,-1)}, {255, 222, 106, 255});
+    polygon(ren_, {p(5,-13), p(16,0), p(16,9), p(13,7), p(13,-1)}, {229, 153, 32, 255});
+    hole(-7,3,2.7f,2.5f); hole(6,4,3,3); hole(0,-7,2.5f,1.5f);
   }
 }
 
 void Renderer::drawRat(const Simulation& sim, bool resting) {
   const Rat& rat = sim.rat();
-  const int px = maze_x_ + rat.position().x * tile_;
-  const int py = maze_y_ + rat.position().y * tile_;
-
-  const int body = std::max(4, tile_ - 7);
-  const int bx = px + (tile_ - body) / 2;
-  const int by = py + (tile_ - body) / 2;
-
-  // Resting (consolidation): dimmed, curled body without nose/feet. The
-  // visual reflects a real consolidation operation in progress.
-  if (resting) {
-    fillRect(bx + 1, by + 1, body - 2, body - 2, kRatRest.r, kRatRest.g,
-             kRatRest.b);
-    return;
+  const int cx = maze_x_ + rat.position().x * tile_ + tile_ / 2;
+  const int cy = maze_y_ + rat.position().y * tile_ + tile_ / 2;
+  const float u = tile_ / 40.0f;
+  const int dir = resting ? 3 : static_cast<int>(rat.facing());
+  auto point = [&](float x, float y) {
+    if (dir == 0) { const float t=x; x=y; y=-t; }
+    else if (dir == 1) { const float t=x; x=-y; y=t; }
+    else if (dir == 2) { x=-x; y=-y; }
+    return SDL_Point{cx + int(std::round(x*u)), cy + int(std::round(y*u))};
+  };
+  auto oval = [&](float x, float y, float rx, float ry, SDL_Color c) {
+    auto q=point(x,y);
+    if (dir < 2) std::swap(rx, ry);
+    ellipse(ren_, q.x, q.y, int(rx*u), int(ry*u), c);
+  };
+  auto line = [&](float x, float y, float xx, float yy, SDL_Color c) {
+    color(ren_,c); auto a=point(x,y), b=point(xx,yy);
+    SDL_RenderDrawLine(ren_,a.x,a.y,b.x,b.y);
+  };
+  const SDL_Color outline{67,71,73,255}, fur{139,144,147,255}, light{175,180,182,255};
+  const SDL_Color pink{191,140,136,255};
+  oval(-1,3,14,10,{170,161,143,255});
+  // Long, tapering pink tail. Distinct from the pointed muzzle.
+  for (int t=0;t<16;++t) {
+    const float x=-10-t*.48f, y=3+std::sin(t*.23f)*6;
+    oval(x,y,t<7?1.6f:1.0f,t<7?1.6f:1.0f,pink);
   }
-
-  // Body.
-  fillRect(bx, by, body, body, kRat.r, kRat.g, kRat.b);
-
-  // Nose in the facing direction + tiny walking feet (2-frame animation).
-  const int off = rat.walkFrame() * 1;
-  switch (rat.facing()) {
-    case Action::Up:
-      fillRect(bx + body / 2 - 1, by - 2, 2, 2, kNose.r, kNose.g, kNose.b);
-      fillRect(bx + 1, by + body - 2 + off, 2, 2, kRat.r, kRat.g, kRat.b);
-      fillRect(bx + body - 3, by + body - 2 - off, 2, 2, kRat.r, kRat.g, kRat.b);
-      break;
-    case Action::Down:
-      fillRect(bx + body / 2 - 1, by + body, 2, 2, kNose.r, kNose.g, kNose.b);
-      fillRect(bx + 1, by + off, 2, 2, kRat.r, kRat.g, kRat.b);
-      fillRect(bx + body - 3, by - off, 2, 2, kRat.r, kRat.g, kRat.b);
-      break;
-    case Action::Left:
-      fillRect(bx - 2, by + body / 2 - 1, 2, 2, kNose.r, kNose.g, kNose.b);
-      fillRect(bx + 1 + off, by + 1, 2, 2, kRat.r, kRat.g, kRat.b);
-      fillRect(bx + body - 3 - off, by + body - 3, 2, 2, kRat.r, kRat.g, kRat.b);
-      break;
-    case Action::Right:
-      fillRect(bx + body, by + body / 2 - 1, 2, 2, kNose.r, kNose.g, kNose.b);
-      fillRect(bx + 1 - off, by + 1, 2, 2, kRat.r, kRat.g, kRat.b);
-      fillRect(bx + body - 3 + off, by + body - 3, 2, 2, kRat.r, kRat.g, kRat.b);
-      break;
-    default:
-      break;
-  }
+  const float walk = resting ? 0 : (rat.walkFrame() ? 1.2f : -1.2f);
+  oval(-6+walk,-8,3,2,pink); oval(-6-walk,8,3,2,pink);
+  oval(6-walk,-5,2,2,pink); oval(6+walk,5,2,2,pink);
+  oval(-3,0,12,9,outline); oval(-3,-.5f,11,8,fur); oval(-5,-2,7,5,light);
+  polygon(ren_,{point(3,-7),point(15,-2),point(17,0),point(15,3),point(3,7)},outline);
+  polygon(ren_,{point(3,-6),point(15,-1),point(16,0),point(14,2),point(3,6)},fur);
+  oval(4,-6,4.5f,4.5f,outline); oval(4,-6,3.5f,3.5f,light); oval(4,-6,2.2f,2.2f,pink);
+  oval(4,6,4,4,outline); oval(4,6,3,3,fur); oval(4,6,1.9f,1.9f,pink);
+  if (resting) line(10,-2,13,-2,outline);
+  else { oval(11,-2.5f,1.7f,1.7f,{24,29,31,255}); oval(11,-3,0.6f,0.6f,{245,246,238,255}); }
+  oval(16,0,1.6f,1.8f,pink);
+  line(13,-1,18,-6,{97,97,91,255}); line(13,1,19,5,{97,97,91,255});
+  line(13,-1,19,-3,{97,97,91,255}); line(13,1,18,7,{97,97,91,255});
 }
 
 void Renderer::drawStatusBar(const PanelData& p) {
-  std::string status = p.paused ? "PAUSED" : (p.consolidating ? "REST" : "RUNNING");
-  std::string line = "RAT  S " + formatInt(static_cast<int64_t>(p.lifetime_steps)) +
-                     "  CH " + formatInt(static_cast<int64_t>(p.cheese_total)) +
-                     "  E " + formatFloat(p.avg_energy, 2) +
-                     "  H " + formatFloat(p.avg_hunger, 2) +
-                     "  F " + formatFloat(p.avg_fatigue, 2) +
-                     "  S " + formatFloat(p.avg_stress, 2) +
-                     "  [ " + status + " ]";
-  drawText(8, 8, line, 2, kTextHi.r, kTextHi.g, kTextHi.b);
+  const int scale = width_ >= 600 ? 3 : 2;
+  drawText(28, height_ < 400 ? 16 : 26, "SELF IMPROVING RAT", scale, kTextHi.r, kTextHi.g, kTextHi.b);
+  drawText(28, height_ < 400 ? 38 : 54, "A LITTLE LIFE. A LIFETIME OF LEARNING.", width_ >= 600 ? 2 : 1,
+           kText.r, kText.g, kText.b);
+  const std::string status = p.paused ? "PAUSED" : p.consolidating ? "RESTING + LEARNING" : "EXPLORING";
+  drawText(28, height_ < 400 ? 58 : 85, status, 2, kGold.r, kGold.g, kGold.b);
+  drawText(28, height_ - 48, "SPACE PAUSE   R NEW MAZE   S SAVE", width_ >= 600 ? 2 : 1,
+           kText.r, kText.g, kText.b);
+  drawText(28, height_ - 28, "D DIAGNOSTICS   ESC SAVE + EXIT", width_ >= 600 ? 2 : 1,
+           kText.r, kText.g, kText.b);
 }
 
 void Renderer::drawPanel(const PanelData& p) {
-  if (!p.debug) return;
+  if (panel_x_ + 286 > width_) {
+    drawText(28, height_ - 72, "CHEESE " + formatInt(p.cheese_total) +
+             "  STEPS " + formatInt(p.lifetime_steps), width_ >= 600 ? 2 : 1,
+             kTextHi.r, kTextHi.g, kTextHi.b);
+    return;
+  }
   const int x = panel_x_;
-  int y = 8;
-  const int scale = 2;
+  int y = 120;
   auto row = [&](const std::string& text, bool hi = false) {
-    drawText(x, y, text, scale, hi ? kTextHi.r : kText.r,
+    if (y > height_ - 75) return;
+    drawText(x, y, text, 2, hi ? kTextHi.r : kText.r,
              hi ? kTextHi.g : kText.g, hi ? kTextHi.b : kText.b);
-    y += 14;
+    y += 23;
   };
-  row("MAZE " + formatInt(p.maze_generations) + "  CHEESE " + formatInt(p.cheese_total), true);
-  row("AGE " + formatDuration(p.runtime_s) + "  STEPS " + formatInt(p.lifetime_steps));
-  row("EPISODES " + formatInt(static_cast<int64_t>(p.episode_count)) + "  STEPS/CH " +
-          formatFloat(p.mean_steps, 0) + " med " + formatFloat(p.median_steps, 0));
-  row("ADAPT " + formatFloat(p.adaptation_steps, 0) + " steps");
-  row("WALL/1K " + formatFloat(p.wall_rate, 1) + "  OSC/1K " + formatFloat(p.revisit_rate, 1) +
-      "  REW " + formatFloat(p.avg_reward, 3));
-  row("DIV " + formatFloat(p.entropy, 2) + "  REP " + formatFloat(p.repeat_rate, 2) +
-      "  EXP " + formatFloat(p.exploration_rate, 2) + "  EPS " + formatFloat(p.epsilon, 2));
-  row("E " + formatFloat(p.avg_energy, 2) + "  H " + formatFloat(p.avg_hunger, 2) +
-      "  F " + formatFloat(p.avg_fatigue, 2) + "  ST " + formatFloat(p.avg_stress, 2));
-  row("MIN-E " + formatFloat(p.min_energy, 2) + "  H>0.8 " + formatFloat(p.extreme_hunger * 100, 0) + "%");
-  row("NOV " + formatFloat(p.avg_novelty, 2) + "  CUR " + formatFloat(p.curiosity_rate, 3) +
-      "  UNC " + formatFloat(p.uncertainty, 2) + "  PRED " + formatFloat(p.pred_loss, 3));
-  row("STRESS-FREE " + formatInt(p.stress_free_steps) + " steps");
-  row("TRAIN " + formatInt(static_cast<int64_t>(p.training_updates)) +
-      "  INVALID " + formatInt(static_cast<int64_t>(p.invalid_updates)));
-  row("CONN A " + formatInt(static_cast<int64_t>(p.active_conn)) + " D " +
-      formatInt(static_cast<int64_t>(p.dormant_conn)) + "  P " +
-      formatInt(static_cast<int64_t>(p.pruned)) + " R " +
-      formatInt(static_cast<int64_t>(p.rewired)) + " OK " +
-      formatInt(static_cast<int64_t>(p.struct_ok)) + " REJ " +
-      formatInt(static_cast<int64_t>(p.struct_rejected)));
-  row("EPISODIC " + formatInt(static_cast<int64_t>(p.episodic_used)) + "/" +
-      formatInt(static_cast<int64_t>(p.episodic_cap)) + "  REPL " +
-      formatInt(static_cast<int64_t>(p.episodic_replacements)));
-  row("CONSOL " + formatInt(static_cast<int64_t>(p.consolidation_cycles)) +
-      "  OPS " + formatInt(static_cast<int64_t>(p.consolidation_ops)));
-  row("CKPT " + formatInt(static_cast<int64_t>(p.checkpoints_saved)) + "  " +
-      formatFloat(p.fps, 0) + " fps  " + formatFloat(p.sim_steps_per_sec, 1) + " sps");
-  row("SPACE PAUSE   R MAZE   S SAVE   D DEBUG   ESC QUIT");
+  if (p.debug) {
+    row("TRAINING DIAGNOSTICS", true); y += 6;
+    row("CHEESE " + formatInt(p.cheese_total) + "  MAZE " + formatInt(p.maze_generations));
+    row("STEPS " + formatInt(p.lifetime_steps));
+    row("UPDATES " + formatInt(p.training_updates));
+    row("INVALID UPDATES " + formatInt(p.invalid_updates));
+    row("EPSILON " + formatFloat(p.epsilon, 3));
+    row("PRED LOSS " + formatFloat(p.pred_loss, 3));
+    row("NOVELTY " + formatFloat(p.avg_novelty, 3));
+    row("REWARD " + formatFloat(p.avg_reward, 3));
+    row("WALL / 1K " + formatFloat(p.wall_rate, 1));
+    row("REVISIT / 1K " + formatFloat(p.revisit_rate, 1));
+    row("STEPS / CHEESE " + formatFloat(p.mean_steps, 0));
+    row("MEMORIES " + formatInt(p.episodic_used) + "  REPLAY " + formatInt(p.replay_used));
+    row("CONNECTIONS " + formatInt(p.active_conn));
+    row("PRUNED " + formatInt(p.pruned) + "  REWIRED " + formatInt(p.rewired));
+    row("RESTS " + formatInt(p.consolidation_cycles) + "  OPS " + formatInt(p.consolidation_ops));
+    row("SAVED " + formatInt(p.checkpoints_saved) + "  " + formatFloat(p.fps, 0) + " FPS");
+    row("D TO RETURN TO ORGANISM");
+    return;
+  }
+  auto meter = [&](const std::string& label, double value, SDL_Color c) {
+    row(label + "  " + formatFloat(value * 100, 0) + "%");
+    rounded(ren_, x, y-5, 260, 5, 2, kWall);
+    const int w = int(260 * std::clamp(value, 0.0, 1.0));
+    if (w > 0) rounded(ren_, x, y-5, w, 5, 2, c);
+    y += 16;
+  };
+  row("LIFETIME", true); y += 6;
+  row(formatInt(p.cheese_total) + " CHEESE FOUND", true);
+  row(formatInt(p.lifetime_steps) + " STEPS  /  MAZE " + formatInt(p.maze_generations));
+  row("AWAKE " + formatDuration(p.runtime_s)); y += 15;
+  meter("ENERGY", p.avg_energy, {153,187,160,255});
+  meter("HUNGER", p.avg_hunger, kGold);
+  meter("FATIGUE", p.avg_fatigue, {152,169,187,255});
+  y += 12; row("LEARNING", true);
+  row(formatInt(p.training_updates) + " NEURAL UPDATES");
+  row("MEMORIES " + formatInt(p.episodic_used) + "/" + formatInt(p.episodic_cap));
+  row("REPLAY " + formatInt(p.replay_used) + "/" + formatInt(p.replay_cap));
+  row("SAVED " + formatInt(p.checkpoints_saved) + "  RESTS " + formatInt(p.consolidation_cycles));
+  row("D FOR TRAINING DIAGNOSTICS");
 }
 
 void Renderer::render(const Simulation& sim, const PanelData& panel) {

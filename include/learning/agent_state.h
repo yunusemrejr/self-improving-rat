@@ -74,6 +74,8 @@ struct AgentState {
   std::vector<float> episodic_floats;
   std::vector<uint32_t> episodic_meta;
   std::vector<uint32_t> novelty_table;
+  std::vector<float> replay_floats;
+  std::vector<uint32_t> replay_meta;
 
   bool allFinite() const;
 };
@@ -86,7 +88,7 @@ inline bool AgentState::allFinite() const {
   };
   return finite_vec(online_params) && finite_vec(target_params) &&
          finite_vec(adam_m) && finite_vec(adam_v) && finite_vec(utility) &&
-         finite_vec(episodic_floats) &&
+         finite_vec(episodic_floats) && finite_vec(replay_floats) &&
          std::isfinite(homeo.energy) && std::isfinite(homeo.hunger) &&
          std::isfinite(homeo.fatigue) && std::isfinite(homeo.stress) &&
          std::isfinite(homeo.curiosity_need) &&

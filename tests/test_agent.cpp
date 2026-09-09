@@ -159,6 +159,7 @@ TEST(agent_recurrent_state_evolves_and_affects_policy) {
   // With random weights and a zeroed recurrent state the very first forward
   // equals the later one only if h stays zero; after 10 steps h != 0, so the
   // outputs may differ. This check is deliberately loose (structure exists).
+  CHECK(differs);
   CHECK(a.rnnSize() == cfg.rnn_hidden);
 }
 
@@ -272,4 +273,45 @@ TEST(agent_state_roundtrip_preserves_learning) {
   AgentState bad = st;
   bad.input = st.input + 1;
   CHECK(!b.importState(bad));
+}
+
+TEST(agent_consolidation_sequence_ops_train_and_stay_bounded) {
+  // Chunked-BPTT sequence ops (consolidation) must train without corrupting
+  // state: run enough steps to fill the replay, then execute a few sequence
+  // ops and check parameters moved, everything stays finite and no invalid
+  // update was recorded.
+  Config cfg;
+  cfg.observation_frames = 1;
+  cfg.train_interval_steps = 1;
+  cfg.replay_capacity = 64;
+  cfg.bptt_chunk_len = 8;  // enable the chunked-BPTT path this test exercises
+  Rng rng(11);
+  Agent a(cfg, rng);
+  float o[30] = {0.1f}, o2[30] = {0.2f};
+  float ht[3] = {0.01f, 0.01f, 0.0f};
+  for (int i = 0; i < 200; ++i) {
+    const float* h_prev = a.recurrentState();
+    auto d = a.selectAction(o);
+    a.computeIntrinsics(o, o2, ht, -0.02f);
+    a.observeAndTrain(o, h_prev, d.action, -0.02f, -0.02f, o2, false, ht, false,
+                      false, static_cast<uint64_t>(i));
+  }
+  AgentState before;
+  a.exportState(before);
+  const uint64_t before_training = a.trainingUpdates();
+  const int done = a.consolidationSequenceOps(4);
+  CHECK(done > 0);  // replay had enough consecutive entries
+  AgentState after;
+  a.exportState(after);
+  CHECK(after.allFinite());
+  CHECK(before.online_params != after.online_params);  // weights moved
+  CHECK(a.trainingUpdates() > before_training);        // updates counted
+  CHECK(a.invalidUpdates() == 0);
+  // Sequence ops require consecutive entries; a too-small replay returns 0.
+  Config cfg2;
+  cfg2.observation_frames = 1;
+  cfg2.bptt_chunk_len = 8;  // enable so the "0" below tests too-small-replay, not disabled
+  Rng rng2(12);
+  Agent tiny(cfg2, rng2);
+  CHECK(tiny.consolidationSequenceOps(2) == 0);
 }

@@ -16,6 +16,14 @@ rewards is hard for the built-in learner; measured behavior is documented in
 [How improvement is measured](#how-improvement-is-measured) and in the
 test suite.
 
+![Grey rat and golden cheese in the software-rendered habitat](docs/preview.png)
+
+The September 2026 update adds grey fur, ears, whiskers and a curved tail;
+three-faced golden cheese wedges; rounded warm corridors; and an always-visible
+learning panel. The learner now saves recent replay, reconstructs recurrent
+sequences, avoids observed walls and uses episodic action counts to explore.
+See [measured results and validation](docs/validation-20260909.md).
+
 ---
 
 ## Requirements
@@ -43,7 +51,7 @@ test suite.
 Environment hooks (all optional):
 
 | Variable | Effect |
-|---|---|
+| --- | --- |
 | `SIR_CONFIG=PATH` | alternate config file |
 | `SIR_SEED=N` | fixed random seed (overrides the config `seed` key) |
 | `SIR_HEADLESS=1` | no window; runs the simulation only |
@@ -60,7 +68,7 @@ SDL_VIDEODRIVER=dummy SIR_MAX_STEPS=2000 SIR_SCREENSHOT=/tmp/rat.bmp ./build/sir
 ## Controls
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `Space` | pause / resume |
 | `R` | regenerate the maze (learned weights are untouched) |
 | `S` | save a checkpoint immediately |
@@ -83,7 +91,7 @@ config ──▶ Application ──▶ Simulation (maze, rat, cheese, body)
              │  │         prioritized replay, episodic memory, novelty,
              │  │         plasticity, consolidation)
              │  └──▶ Metrics (observed statistics only)
-             └──▶ CheckpointStore (atomic v2 persistence)
+             └──▶ CheckpointStore (atomic v3 persistence)
 ```
 
 - **Simulation** owns the maze, the rat, the cheese and the homeostatic body.
@@ -93,9 +101,10 @@ config ──▶ Application ──▶ Simulation (maze, rat, cheese, body)
 - **Application** composes the reward from the observation, the simulation
   outcome and the agent's intrinsic signals, then drives training,
   consolidation, autosave and the render loop.
-- **Renderer** is a software SDL2 renderer: restrained monochrome pixel art
-  (charcoal background, gray walls/floor, light-gray rat, muted cheese), a
-  hand-encoded 3×5 bitmap font, no gradients, no sound.
+- **Renderer** uses SDL2 software drawing with a dark habitat, warm rounded
+  paths, a grey rat and golden cartoon cheese. It needs no textures, external
+  assets, GPU or network. The maze fits the configured window; a compact
+  bitmap font labels real organism and learning metrics.
 
 ## Simulation rules
 
@@ -150,8 +159,8 @@ One base frame has **30 channels, all in `[0,1]`**; the network input is
 No channel carries the maze map, the cheese coordinates, path lengths,
 reachability information, or any future state. The two proprioception
 channels are the rat's own location (what a real animal knows about its own
-body), not hidden maze information; they make the task a proper observable
-MDP so navigation is learnable. Pathfinding (BFS) exists only in the maze
+body), not hidden maze information; they help distinguish local observations. The environment remains partially
+observable because unvisited maze structure is hidden. Pathfinding (BFS) exists only in the maze
 module for validation and tests and is never passed to the agent.
 
 ## Action space
@@ -170,7 +179,7 @@ r_total = r_navigation                     cheese +10 / wall −0.2 /
                                           (factors from config, all bounded)
         + r_curiosity                      curiosity_gain · novelty · (0.5+0.5·need)
         + r_prediction                     prediction_gain · (1 − uncertainty)
-        + r_scent_proximity                scent_gain · max_scent_after
+        + r_scent_potential                scent_gain · (gamma·Phi(next) − Phi(now))
         + r_collapse                       −collapse_penalty when the recent action
                                           entropy is very low and the recent average
                                           reward is negative (contextual anti-collapse)
@@ -179,79 +188,86 @@ r_total = r_navigation                     cheese +10 / wall −0.2 /
 - The navigation reward is returned by the simulation (`reward_nav`); the
   homeostatic reward is computed from the body state after the step; the
   curiosity/prediction terms come from the agent's intrinsic signals.
-- `r_scent_proximity` is a dense shaping term derived from the rat's own
-  scent perception (the max scent channel after the action). It rewards being
-  near the cheese and, unlike a scent-delta form, does not punish the detours
-  a maze requires; it transfers across cheese re-placements. It uses no
-  privileged information.
+- `Phi` is the sum of the four scent channels in the newest observation
+  frame. It is zero at a cheese terminal. Discounted potential differences
+  telescope: standing still or circling cannot earn a continuing proximity
+  bonus. The predictive-accuracy reward defaults to zero to avoid rewarding
+  easy-to-predict stationary behavior; prediction learning and curiosity remain.
 - The world-model prediction target is the **external** reward
   (navigation + homeostatic), not the composite; the composite reward is the
   RL target.
 
 ## Network and learning
 
-- **Architecture**: GRU (16 hidden units) → policy head (4 linear Q-values)
-  + prediction head (16 sigmoid outputs). Input `30×frames`.
-  Parameters: GRU (3 gates × (input·hidden + hidden² + hidden)) + policy
-  head + prediction head ≈ 2500 floats for the default configuration.
-- **Policy**: double-DQN over the four actions; ε-greedy exploration with a
-  configurable schedule (`exploration_start/end/decay_steps` scaled by the
-  developmental schedule).
-- **Optimizer**: Adam (β₁=0.9, β₂=0.999), learning rate scaled by the
-  developmental schedule; global gradient clipping (`gradient_clip_norm`);
-  soft target-network updates (`target_update_tau`); NaN/inf guards that
-  restore the last valid parameters and count `invalid_updates`.
-- **Experience**: a bounded, preallocated replay buffer with **prioritized
-  sampling** (sampling weight = |TD error|), so rare high-error experiences
-  (cheese) are not diluted by the abundant low-error ones.
-- **Recurrent memory**: each replay transition stores the recurrent state
-  `h_prev` used when it was collected (truncated BPTT-1 / stale-state
-  approximation, documented). The recurrent state is reset only at
-  life-cycle boundaries (maze regeneration, consolidation).
-- **World model / prediction head**: predicts the next local wall+scent
-  pattern (12 channels), the homeostatic deltas (3), and the external reward
-  (1) — 16 outputs, trained with MSE scaled by `prediction_loss_weight`.
-- **Curiosity**: novelty = 0.5·state-novelty + 0.5·prediction-error
-  (normalized). State novelty comes from a bounded quantized hash table
-  (novelty = 1/√count, so repeated exposure loses novelty). The curiosity
-  reward is small and capped (`curiosity_reward_gain`), so it can never
-  dominate cheese or survival objectives, and wall-collision loops lose
-  novelty by construction.
-- **Episodic memory**: strictly bounded (256 entries) store of significant
-  transitions (cheese, large rewards, high novelty, high prediction error).
-  When full, the least-significant entry is replaced. Replayed during
-  consolidation.
-- **Structural plasticity** (only during consolidation): weights carry
-  bit-masks (active/dormant) and utility traces (EMA of |gradient·weight|).
-  Consolidation prunes demonstrably weak active connections (within hard
-  per-cycle and active-fraction caps), reactivates a bounded number of
-  previously useful dormant ones with small fresh weights, and strengthens
-  the most useful ones — then validates the network on recent observations
-  and rolls back on instability. Masks are serialized with the checkpoint.
-- **Development**: age = min(1, lifetime_steps / maturity_steps); continuous
-  monotone multipliers keep learning, exploration and plasticity bounded and
-  never switched off (learning-rate scale ≥ 0.1, exploration scale ≥ 0.05,
-  plasticity scale ≥ 0.1).
-- **Consolidation**: triggered after `consolidation_every_cheeses` cheeses
-  (or high fatigue), at least `consolidation_min_interval_steps` apart. It
-  performs a bounded number of training batches (mix of episodic memory and
-  replay, capped per cycle), lets the body rest (fatigue recovery), runs the
-  plasticity evaluation, and saves a checkpoint. Work is spread across ticks
-  so the GUI stays responsive; no CPU spikes.
+- **Small on-device network:** 30 inputs, a 16-unit GRU, four Q values and
+  16 sigmoid prediction outputs: 2,596 float32 parameters (10.1 KiB of
+  weights per network). Online training runs on one CPU thread with reused
+  scratch storage. Float32 is retained for online Adam stability; this is
+  not an int8 inference deployment or an accelerator benchmark.
+- **Double-DQN with correct recurrence:** online and target networks each
+  advance the current observation before evaluating the next one. Optional
+  1–8-step returns stop at terminal or sequence boundaries. Rest and maze
+  changes truncate sequences; nonterminal boundaries retain their bootstrap.
+  One-step replay still uses a stored hidden-state anchor, so staleness is
+  reduced rather than eliminated.
+- **Recurrent sequence learning:** every 32 simulation steps, an eight-step
+  chunk trains with backpropagation through time. Up to four preceding
+  transitions reconstruct the hidden state without gradients (burn-in).
+  Online and target recurrent chains are separate. Consolidation also uses
+  sequence batches, within its existing operation budget. Neither burn-in,
+  returns nor gradients cross recorded episode boundaries.
+- **Tempered prioritized replay:** a preallocated sum tree samples in
+  `O(batch × log capacity)` rather than scanning the whole buffer. Priority
+  is `clamp(abs(TD error), 0.001, 1000)^alpha`, with `alpha=0.6` by default.
+  Stratified samples receive importance weights `(N·P(i))^-beta`, normalized
+  within the batch and averaged by batch size. Beta anneals from 0.5 to 1
+  over the exploration schedule; zero disables the correction.
+- **Exploration with episodic memory:** observed cardinal wall bits mask both
+  behavior actions and bootstrap argmaxes. Bounded counts indexed by the
+  rat's own position/action add a UCB-style `0.5*sqrt(2*log(2+visits)/(1+action_count))` bonus to
+  locally normalized behavior Q values and
+  bias random exploration toward less-tried actions. Counts reset at food,
+  rest, maze and session boundaries. They never inspect the maze map or food
+  coordinates. Frozen greedy evaluation disables both this bonus and random
+  exploration, separating learned values from exploration assistance.
+- **Stable updates:** Huber TD loss, Adam, global norm clipping, soft target
+  updates and finite-input checks. An invalid update cannot contaminate the
+  target network. Dormant connections are masked in gradients, optimizer
+  moments and updated weights, preventing accidental regrowth.
+- **Prediction and curiosity:** the auxiliary head predicts the next 12
+  wall/scent channels, three homeostatic deltas and external reward. Novelty
+  combines bounded hashed state counts and prediction error. This is an
+  auxiliary predictor, not a planner or a full action-conditioned world model.
+- **Retained learning:** significant experiences use a bounded episodic
+  store; weaker arrivals cannot evict stronger cheese experiences. Connection
+  utility uses a persistent exponential moving average. Development keeps
+  learning and exploration above configured floors. Consolidation replays
+  memories and performs bounded structural updates with instability checks.
+
+These mechanisms adapt [prioritized experience replay](https://arxiv.org/abs/1511.05952)
+and [recurrent replay with burn-in](https://willdabney.com/publication/r2d2/)
+to this app's small CPU budget. The position/action count bonus is a simple
+local exploration mechanism, not a reproduction of NGU or Agent57. There is
+no claim to implement the newest or universally best edge RL algorithm.
 
 ## Checkpoint persistence
 
-Binary format `SIRCPT02` with an FNV-1a64 checksum over the whole payload.
+Binary format `SIRCPT03` (reads and migrates existing `SIRCPT02` files) with an FNV-1a64 checksum over the whole payload.
 It stores: topology, counters, exploration/optimizer state (Adam moments),
 the complete neural parameters (online + target), connection masks and
 utility traces, the RNG state, the homeostatic snapshot, the novelty table,
-the episodic memory, and the lifetime/consolidation/plasticity history.
+the episodic memory, recent replay transitions, priorities and sequence
+boundaries, and lifetime/consolidation/plasticity history. Full default replay
+(4,096 transitions) survives a restart. Larger buffers save the newest entries
+within an 8 MiB replay snapshot budget. A smaller configured capacity restores
+the newest entries that fit. Restart begins a new maze and transient recurrent
+context; it is not a bit-for-bit continuation of the simulation world.
 
 Safety properties (all covered by tests):
 
 - atomic writes: temp file → fsync → rename; the previous valid checkpoint is
   kept as `.bak` and is never overwritten before the new file is fully
-  written and validated (re-read + checksum after every save);
+  written and validated; directory fsync makes the rename durable;
 - load order: primary → backup → fresh organism with a clear log; corrupt
   files are renamed `.bad` (legacy v1 files `.legacy-v1`), never silently
   deleted;
@@ -259,7 +275,8 @@ Safety properties (all covered by tests):
   restored; truncated, checksum-corrupted, NaN-containing or trailing-garbage
   files are rejected;
 - checkpoints with a topology that does not match the current configuration
-  are reported as incompatible and preserved (a fresh organism starts);
+  are reported as incompatible and preserved (a fresh organism starts; saving
+  to that directory is refused so the incompatible organism cannot be overwritten);
 - only the two newest checkpoints exist on disk (primary + backup).
 
 ## Resource limits
@@ -274,8 +291,9 @@ Safety properties (all covered by tests):
   `render_frames_per_second`; training happens every `train_interval_steps`
   with fixed batch size; consolidation work is capped per cycle. No
   busy-wait loops; the frame loop sleeps.
-- Resident memory is ~10–15 MB in headless long runs (measured; no growth
-  over 200k steps).
+- The full default replay snapshot is about 1.31 MiB. See the current
+  benchmark CSV for measured peak resident memory and CPU time. Increasing
+  configured model, maze or buffer sizes increases resource use.
 
 ## Configuration
 
@@ -291,7 +309,7 @@ capacity, development, consolidation, structural plasticity), persistence
 
 The shipped defaults are chosen for **learnability**: a 13×9 maze with heavy
 braiding, a scent radius that covers the maze, a small minimum cheese
-distance, dense scent-proximity shaping, prioritized replay and per-2-step
+distance, potential-based scent shaping, prioritized replay and per-2-step
 training. Larger mazes are supported (`maze_width/height` up to 199) but are
 harder for the learner; see Known limitations.
 
@@ -305,19 +323,30 @@ harder for the learner; see Known limitations.
 - A full integration run (agent + simulation, headless, deterministic) is
   part of the tests; the rat finds cheese, consolidation runs, and all state
   stays bounded.
-- Observed behavior on the default configuration: the rat finds cheese
-  roughly 1.5–2× more often than the exploration schedule alone would
-  predict (measured over multiple seeds; e.g. ~16–35 cheese per 50–200k
-  steps). The greedy policy's cheese-approach rate is above chance. Learning
-  is real but modest; it is **not** claimed that the rat monotonically
-  improves forever or that it solves mazes reliably.
+- **Matched online benchmark:** 100,000 simulation steps per seed, seeds
+  `1 2 3 42 12345`, fresh checkpoints, unchanged maze difficulty. Before this
+  update: 186 cheeses total (mean 37.2). Updated behavior: 1,167 total (mean
+  233.4), **6.27×** the collections. This compares the whole system, including
+  wall masks, exploration and learning; it does not isolate neural learning.
+- **Frozen evaluation:** `sir_eval` evaluates saved weights on fresh seeds
+  with training disabled, alongside a legal random walk and an untrained
+  network with the same memory-assisted exploration. It also reports greedy
+  learned behavior with exploration disabled. See the linked validation
+  report for results and limitations; online reward alone is not evidence of
+  reliable generalization.
+
+```bash
+TAG=my_run KEEP_RUNS=/tmp/rat-evaluation tools/bench.sh 100000 1 2 3 42 12345
+# Use one of the retained configuration paths printed by the benchmark:
+./build-bench/sir_eval /tmp/rat-evaluation/seed-1-XXXXXX/config.cfg 5000 1001 10
+```
 
 ## Known limitations
 
 - **Maze navigation is hard for the built-in learner.** With sparse, moving
   rewards (the cheese is re-placed on every collection), Q-learning with a
   small GRU adapts slowly; the shipped defaults keep the task learnable but
-  the greedy policy is only modestly better than exploration. Long-horizon
+  the learned greedy policy can still stall, and exploration remains essential. Long-horizon
   navigation in large mazes (e.g. 47×31) is not reliably learned within
   practical run times — this is a documented consequence of the local
   perception and sparse-reward design, not a hidden mechanism.

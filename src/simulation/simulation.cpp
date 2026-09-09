@@ -125,9 +125,8 @@ void Simulation::pushFrame() {
     first_frame_ = false;
   } else {
     // Shift older frames down and append the newest at the end.
-    std::copy_backward(frame_history_.begin(),
-                       frame_history_.end() - kObservationBase,
-                       frame_history_.end());
+    std::copy(frame_history_.begin() + kObservationBase,
+              frame_history_.end(), frame_history_.begin());
     std::copy(base, base + kObservationBase,
               frame_history_.end() - kObservationBase);
   }

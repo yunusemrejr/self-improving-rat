@@ -233,3 +233,47 @@ TEST(checkpoint_validate_fnv1a) {
   const uint8_t data[] = {'a', 'b', 'c'};
   CHECK(CheckpointStore::fnv1a64(data, 3) == fnv(data, 3));
 }
+
+TEST(checkpoint_v3_replay_roundtrip_and_v2_migration) {
+  CkptEnv env("replay_v3");
+  Rng rng(2); Agent agent(env.cfg,rng);
+  float s[30]{},h[16]{},ht[3]{};
+  for(int i=0;i<40;++i)
+    agent.observeAndTrain(s,h,Action::Up,.2f,.2f,s,false,ht,false,false,i);
+  AgentState state; agent.exportState(state);
+  CHECK(env.s().save(state)); AgentState loaded;
+  CHECK(env.s().load(&loaded)==LoadResult::Ok);
+  CHECK(loaded.replay_floats==state.replay_floats);
+  CHECK(loaded.replay_meta==state.replay_meta);
+  auto bytes=readFile(env.s().primaryPath());
+  CHECK(std::memcmp(bytes.data(),"SIRCPT03",8)==0);
+  // v2 is the identical payload prefix, without the two replay vectors.
+  const size_t extension=8+state.replay_floats.size()*4+state.replay_meta.size()*4;
+  bytes.resize(bytes.size()-8-extension);
+  bytes[7]='2'; bytes[8]=2;
+  const uint64_t checksum=CheckpointStore::fnv1a64(bytes.data(),bytes.size());
+  for(int i=0;i<8;++i) bytes.push_back(static_cast<uint8_t>(checksum>>(8*i)));
+  CHECK(writeFile(env.s().primaryPath(),bytes));
+  CHECK(env.s().load(&loaded)==LoadResult::Ok);
+  CHECK(loaded.online_params==state.online_params); CHECK(loaded.replay_meta.empty());
+  CHECK(agent.importState(loaded));
+  CHECK(env.s().save(loaded));
+  CHECK(readFile(env.s().backupPath())==bytes); // preserve old organism at migration
+}
+
+TEST(checkpoint_invalid_save_preserves_both_valid_generations) {
+  CkptEnv env("invalid_save"); auto state=env.makeState();
+  CHECK(env.s().save(state)); ++state.lifetime_steps; CHECK(env.s().save(state));
+  const auto primary=readFile(env.s().primaryPath()), backup=readFile(env.s().backupPath());
+  state.adam_v[0]=-1;
+  CHECK(!env.s().save(state));
+  CHECK(primary==readFile(env.s().primaryPath())); CHECK(backup==readFile(env.s().backupPath()));
+}
+
+TEST(checkpoint_future_format_preserved_and_not_overwritten) {
+  CkptEnv env("future"); auto state=env.makeState(); CHECK(env.s().save(state));
+  auto bytes=readFile(env.s().primaryPath()); bytes[7]='9'; bytes[8]=9;
+  CHECK(writeFile(env.s().primaryPath(),bytes)); AgentState out;
+  CHECK(env.s().load(&out)==LoadResult::Incompatible);
+  CHECK(!env.s().save(state)); CHECK(readFile(env.s().primaryPath())==bytes);
+}

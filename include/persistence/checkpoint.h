@@ -1,8 +1,8 @@
 #pragma once
-// Checkpoint persistence. Binary format v2 ("SIRCPT02") stores the complete
+// Checkpoint persistence. Binary format v3 ("SIRCPT03"), with v2 migration, stores the complete
 // organism state (topology, hyperparameters, counters, homeostasis, age,
 // runtime, recurrent network + heads, Adam moments, masks, utility traces,
-// episodic memory, novelty table, RNG state) with an FNV-1a64 checksum.
+// episodic memory, replay transitions/priorities, novelty table, RNG state) with an FNV-1a64 checksum.
 //
 // Safety properties:
 //  - atomic writes: temp file + fsync + rename; previous checkpoint kept as

@@ -6,6 +6,7 @@
 #include "test_framework.h"
 
 #include "learning/agent.h"
+#include "learning/reward.h"
 #include "simulation/simulation.h"
 #include "utility/config.h"
 #include "utility/rng.h"
@@ -54,11 +55,7 @@ struct SimLoop {
         (0.5 + 0.5 * ha.curiosity_need);
     const double pred_bonus =
         cfg.prediction_reward_gain * (1.0 - agent.uncertainty());
-    const int lf = (cfg.observation_frames - 1) * kObservationBase;
-    const float scent_after = std::max(
-        std::max(s2[lf + 8], s2[lf + 9]), std::max(s2[lf + 10], s2[lf + 11]));
-    const double scent_proximity =
-        cfg.scent_proximity_reward_gain * static_cast<double>(scent_after);
+    const double scent_proximity = scentPotentialReward(cfg, s, s2, out.cheese_reached);
     const float r_total = static_cast<float>(
         std::max(-12.0, std::min(12.0,
             static_cast<double>(reward_ext) + curiosity + pred_bonus +

@@ -1,4 +1,5 @@
 #include "app/application.h"
+#include "learning/reward.h"
 
 #include <SDL.h>
 
@@ -131,6 +132,10 @@ int Application::run(const Options& opts) {
 
   // Observation ring for plasticity evaluation (bounded).
   recent_obs_.assign(static_cast<size_t>(64) * agent_->inputSize(), 0.0f);
+  // Reusable per-step snapshot buffers (sized once; contents overwritten
+  // every doSimStep, so no per-step heap allocation on the hot loop).
+  step_obs_.resize(static_cast<size_t>(agent_->inputSize()));
+  step_h_prev_.resize(static_cast<size_t>(agent_->rnnSize()));
 
   last_autosave_ms_ = nowMs();
   last_sim_step_ms_ = nowMs();
@@ -317,14 +322,12 @@ void Application::doSimStep() {
   // calls (sim.step() shifts the frame history; selectAction() advances the
   // recurrent state). Copy both into locals so the stored transition is the
   // true pre-action state (aliasing fix).
-  std::vector<float> s_local(agent_->inputSize());
   std::copy(sim_->observe(), sim_->observe() + agent_->inputSize(),
-            s_local.begin());
-  std::vector<float> h_prev_local(agent_->rnnSize());
+            step_obs_.begin());
   std::copy(agent_->recurrentState(),
-            agent_->recurrentState() + agent_->rnnSize(), h_prev_local.begin());
-  const float* s = s_local.data();
-  const float* h_prev = h_prev_local.data();
+            agent_->recurrentState() + agent_->rnnSize(), step_h_prev_.begin());
+  const float* s = step_obs_.data();
+  const float* h_prev = step_h_prev_.data();
   const Agent::Decision d = agent_->selectAction(s);
   const int action = static_cast<int>(d.action);
   // Episode length: steps since the previous cheese, including this step.
@@ -355,15 +358,9 @@ void Application::doSimStep() {
       (0.5 + 0.5 * ha.curiosity_need);
   const double pred_bonus =
       cfg_.prediction_reward_gain * (1.0 - agent_->uncertainty());
-  // Scent-proximity shaping: bonus proportional to the strongest scent
-  // channel after the action (newest observation frame = current sensory
-  // state). Derived only from the rat's own perception; rewards being near
-  // the cheese and transfers across cheese re-placements.
-  const int last_frame = (cfg_.observation_frames - 1) * kObservationBase;
-  const float scent_after = std::max(
-      {s2[last_frame + 8], s2[last_frame + 9], s2[last_frame + 10], s2[last_frame + 11]});
-  const double scent_proximity =
-      cfg_.scent_proximity_reward_gain * static_cast<double>(scent_after);
+  // Potential shaping: gamma*Phi(next)-Phi(now). Terminal potential is zero
+  // because collecting food starts a new goal. Circling cannot farm scent reward.
+  const double scent_proximity = scentPotentialReward(cfg_, s, s2, out.cheese_reached);
   double collapse = 0.0;
   if (metrics_.actionEntropy() < 0.2 && metrics_.recentAvgReward() < -0.05 &&
       sim_->lifetimeSteps() > 1000) {
@@ -443,9 +440,16 @@ void Application::doConsolidationStep() {
   sim_->homeostasis().update(ev);
   sim_->setNoveltySignal(agent_->lastNovelty());
 
-  // Bounded training ops, spread across ticks (no CPU spikes).
+  // Bounded training ops, spread across ticks (no CPU spikes). Batch ops
+  // (episodic + replay mix) alternate with chunked-BPTT sequence ops so the
+  // recurrent state actually gets trained during consolidation; both draw
+  // from the same per-cycle op budget.
   if (consolidation_ops_left_ > 0 && (consolidation_steps_left_ % 2) == 0) {
-    const int done = agent_->consolidationTrainOps(1);
+    int done = 0;
+    if ((consolidation_steps_left_ % 4) < 2) {
+      done = agent_->consolidationSequenceOps(1);
+    }
+    if (done == 0) done = agent_->consolidationTrainOps(1);
     consolidation_ops_left_ -= done;
     sim_->homeostasis().setUncertainty(agent_->uncertainty());
   }
@@ -511,6 +515,8 @@ void Application::fillPanel(PanelData& p) {
   p.training_updates = agent_->trainingUpdates();
   p.invalid_updates = agent_->invalidUpdates();
   p.explored_total = agent_->exploredCount();
+  p.replay_used = agent_->replaySize();
+  p.replay_cap = agent_->replayCapacity();
   p.episodic_used = agent_->episodicSize();
   p.episodic_cap = agent_->episodicCapacity();
   p.episodic_replacements = agent_->episodicReplacements();

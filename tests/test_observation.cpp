@@ -141,3 +141,16 @@ TEST(observation_internal_state_channels) {
   CHECK_NEAR(o[26], 0.25f, 1e-6);
   CHECK_NEAR(o[27], 1.0f, 1e-6);
 }
+
+#include "simulation/simulation.h"
+TEST(observation_stack_keeps_chronological_frames) {
+  sir::Config cfg; cfg.observation_frames=3;
+  sir::Rng rng(23); sir::Simulation sim(cfg,rng);
+  std::vector<float> previous(sim.observe(),sim.observe()+90);
+  for(int i=0;i<8;++i) {
+    sim.step(static_cast<sir::Action>(i%4));
+    const float* current=sim.observe();
+    for(int k=0;k<60;++k) CHECK_NEAR(current[k],previous[k+30],0);
+    previous.assign(current,current+90);
+  }
+}

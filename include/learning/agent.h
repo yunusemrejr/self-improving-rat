@@ -5,8 +5,8 @@
 // episodic memory, structural plasticity and consolidation support.
 //
 // All training is single-threaded and deterministic given the RNG seed.
-// The recurrent state is truncated-BPTT(1): each replay transition stores
-// the h_prev used when it was collected (stale-state approximation).
+// Single-step replay uses stored recurrent anchors. Online and consolidation
+// sequence batches reconstruct context with burn-in and train through time.
 
 #include "learning/agent_state.h"
 #include "learning/neural_net.h"
@@ -33,23 +33,24 @@ class Agent {
   int inputSize() const { return input_size_; }
   int rnnSize() const { return cfg_.rnn_hidden; }
   int policyOut() const { return 4; }
-  int predOut() const { return 16; }
+  constexpr int predOut() const { return 16; }
   int paramCount() const { return online_.paramCount(); }
-  static int predOutStatic() { return 16; }
+  static constexpr int predOutStatic() { return 16; }
 
-  // --- decision (epsilon-greedy over online Q(obs, h); advances h_) ---
+  // --- decision (masked Q + episodic exploration; advances h_) ---
   struct Decision {
     Action action = Action::Up;
     bool explored = false;
   };
-  Decision selectAction(const float* obs);
+  Decision selectAction(const float* obs, bool explore = true);
+  int greedyAction(const float* obs, const float* q) const;
 
   // Diagnostics/tests: Q-values for `obs` using the current recurrent state
   // (does not alter it). Returns policy_out values.
   void qValuesFor(const float* obs, float* q_out) const;
 
   // Recurrent working memory: transient state, reset at session start and on
-  // major lifecycle boundaries (maze regeneration).
+  // major lifecycle boundaries (food, maze regeneration, consolidation).
   const float* recurrentState() const { return h_.data(); }
   void resetRecurrent();
   // The prediction of the most recent decision step (used by computeIntrinsics).
@@ -83,6 +84,12 @@ class Agent {
   // Runs up to max_ops bounded training batches (mix of episodic memory and
   // replay). Returns the number of ops executed.
   int consolidationTrainOps(int max_ops);
+  // Runs up to max_ops chunked-BPTT sequence batches over consecutive replay
+  // entries (see trainSequenceBatch): real recurrent gradients through the
+  // GRU instead of the truncated-BPTT(1) replay approximation. Bounded by the
+  // same per-consolidation budget; returns the ops executed (0 when disabled
+  // via bptt_chunk_len or the replay has too few consecutive entries).
+  int consolidationSequenceOps(int max_ops);
 
   // --- structural plasticity (consolidation time only) ---
   // Prunes weak connections within hard limits, reactivates a bounded number
@@ -97,6 +104,8 @@ class Agent {
   uint64_t invalidUpdates() const { return invalid_updates_; }
   uint64_t lifetimeSteps() const { return lifetime_steps_; }
   uint64_t exploredCount() const { return explored_count_; }
+  size_t replaySize() const { return replay_.size(); }
+  size_t replayCapacity() const { return replay_.capacity(); }
   size_t episodicSize() const { return episodic_.size(); }
   size_t episodicCapacity() const { return episodic_.capacity(); }
   uint64_t episodicReplacements() const { return episodic_.replacements(); }
@@ -129,7 +138,16 @@ class Agent {
 
   bool trainBatchOn(const std::vector<Sample>& samples,
                     const std::vector<size_t>* replay_idx);  // true = applied
+  // Chunked BPTT over replay_[start .. start+len-1]: the hidden state is
+  // recomputed forward through the chunk (anchor: the stored h_prev of the
+  // first entry), per-step double-DQN targets use the computed continuation
+  // state, gradients are back-propagated through the recurrent chain (using
+  // the grad_h_prev output of NeuralNet::backward), and a single Adam step
+  // is applied with the NaN guard. Training-time truncated-BPTT(1) replay
+  // path remains available alongside online sequence training.
+  bool trainSequenceBatch(size_t start, size_t len);  // true = applied
   void gatherSamples(size_t count, std::vector<Sample>* out, bool prefer_episodic);
+  void burnIn(size_t start, float* online_h, float* target_h);
   float computeEpsilon(uint64_t steps) const;
   void adamUpdate(const float* grad);
   void softUpdateTarget();
@@ -153,6 +171,31 @@ class Agent {
   // working memory
   std::vector<float> h_;
   std::vector<float> last_pred_;
+
+  // Scratch buffers reused across calls (single-threaded) so per-step and
+  // per-batch heap churn is zero. Sizes are fixed by the config; see the
+  // ctor for the sizing. No numeric effect.
+  std::vector<uint32_t> action_visits_; // bounded episodic proprioceptive memory
+  std::vector<size_t> sample_indices_;
+  std::vector<float> burn_h_, burn_ht_, burn_next_, burn_next_t_, seq_target_chain_;
+  std::vector<float> scratch_h2_, scratch_q_;
+  std::vector<float> tb_h_, tb_q_, tb_pred_, tb_h2_, tb_q2_, tb_h2t_, tb_q2t_;
+  std::vector<float> tb_grad_q_, tb_grad_p_, tb_grad_, tb_gb_, tb_snapshot_, tb_td_;
+  std::vector<float> tb_is_w_;
+  std::vector<float> adam_params_;
+  std::vector<float> soft_po_, soft_pt_;
+  std::vector<Sample> train_samples_, cons_samples_;
+
+  // Sequence (chunked-BPTT) scratch; see trainSequenceBatch. Sized for
+  // kSeqChunkLen steps and reused across consolidation ops.
+  static constexpr size_t kSeqChunkLen = 8;
+  std::vector<float> seq_hchain_;   // (kSeqChunkLen+1) * rnn
+  std::vector<float> seq_q_, seq_pred_;  // per chunk step
+  std::vector<float> seq_grad_q_, seq_grad_pred_;
+  std::vector<float> seq_hp_a_, seq_hp_b_;  // grad_h_prev: heads / future flow
+  std::vector<float> seq_gb_a_;  // per-step parameter-gradient output
+  std::vector<float> seq_grad_total_;       // accumulated param gradient
+  std::vector<float> seq_snapshot_, seq_h2_, seq_q2_, seq_h2t_, seq_q2t_, seq_t_;
 
   // intrinsic state
   float last_novelty_ = 0.0f;

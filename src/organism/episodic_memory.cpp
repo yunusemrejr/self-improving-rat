@@ -33,6 +33,7 @@ bool EpisodicMemory::add(EpisodicEntry e) {
       worst_age = en.insert_step;
     }
   }
+  if (e.significance < worst_score) return false;
   entries_[worst] = std::move(e);
   ++replacements_;
   return true;
@@ -67,6 +68,9 @@ bool EpisodicMemory::restoreFrom(const std::vector<float>& floats,
   const size_t count = meta.size() / 4;
   if (count > capacity_) return false;
   if (floats.size() != count * per_entry) return false;
+  for (float value : floats) if (!std::isfinite(value)) return false;
+  for (size_t i = 0; i < count; ++i)
+    if (meta[i * 4] > 3 || (meta[i * 4 + 1] & ~31u)) return false;
   entries_.clear();
   size_t f = 0;
   for (size_t i = 0; i < count; ++i) {

@@ -18,7 +18,8 @@ class NeuralNet {
   // policy_out = number of actions (4); pred_out = prediction head size (16).
   NeuralNet(int input, int rnn_hidden, int policy_out, int pred_out, Rng& rng);
 
-  // q = Wq h + bq ; pred = Wp h + bp ; h = GRU(x, h_prev).
+  // q = Wq h + bq ; pred = sigmoid(Wp h + bp); h = GRU(x, h_prev).
+  // Either output head may be null for recurrent-only burn-in.
   void forward(const float* x, const float* h_prev, float* h_out, float* q,
                float* pred) const;
 
@@ -26,9 +27,15 @@ class NeuralNet {
   // the taken action with dL/dq); grad_pred is pred_out. Fills grad_p
   // (paramCount floats). Recomputed forward internally; `h_out` is a scratch
   // buffer (the recomputed hidden state is written into it).
+  // When grad_h_prev is non-null it receives the gradient w.r.t. h_prev from
+  // the recurrence (so callers can unroll multiple steps into real BPTT).
+  // When grad_h_extra is non-null its elements are added to the hidden-state
+  // gradient before the GRU backward (used to feed a future-step flow into
+  // the current step during an unrolled backward pass).
   void backward(const float* x, const float* h_prev, float* h_out,
-                const float* grad_q, const float* grad_pred,
-                float* grad_p) const;
+                const float* grad_q, const float* grad_pred, float* grad_p,
+                float* grad_h_prev = nullptr,
+                const float* grad_h_extra = nullptr) const;
 
   int input() const { return in_; }
   int rnnHidden() const { return rnn_; }
@@ -45,8 +52,9 @@ class NeuralNet {
 
   // --- structural plasticity ---
   // Masks cover the connection weights only (biases stay dense). One bit per
-  // parameter in the same layout as getParams; bit set = active.
+  // weight in the packed weight layout (biases excluded); bit set = active.
   size_t maskBytes() const { return (paramCount() + 7) / 8; }
+  void maskDense(float* dense) const;
   void getMask(uint8_t* out) const;
   void setMask(const uint8_t* in);
   size_t activeCount() const;
@@ -85,6 +93,10 @@ class NeuralNet {
   std::vector<uint8_t> mask_;  // bit-packed, one bit per param (weights only)
   std::vector<float> utility_;
   std::vector<float> init_scale_;  // per param (weights only)
+  // Backward scratch (reused across calls; single-threaded). Keeps
+  // per-call heap churn at zero. Mutable because backward is const.
+  mutable std::vector<float> scratch_q_, scratch_pred_, scratch_dp_,
+      scratch_grad_h_;
 };
 
 }  // namespace sir

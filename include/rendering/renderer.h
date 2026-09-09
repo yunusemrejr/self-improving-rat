@@ -1,8 +1,5 @@
 #pragma once
-// SDL2 rendering: restrained monochrome pixel-art style (charcoal background,
-// gray walls/floor, light-gray rat, muted cheese). Software renderer with
-// crisp nearest-neighbor pixels; no gradients, no glossy UI, no sound.
-// A compact 3x5 bitmap font renders the diagnostics panel.
+// Software-rendered habitat with grey rat and golden cheese illustrations.
 
 #include "simulation/simulation.h"
 #include "utility/config.h"
@@ -58,6 +55,8 @@ struct PanelData {
   uint64_t invalid_updates = 0;
   uint64_t explored_total = 0;
 
+  size_t replay_used = 0;
+  size_t replay_cap = 0;
   size_t episodic_used = 0;
   size_t episodic_cap = 0;
   size_t episodic_replacements = 0;
@@ -91,8 +90,9 @@ class Renderer {
 
   SDL_Window* win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
-  int maze_x_ = 8;
-  int maze_y_ = 36;
+  int width_ = 1060, height_ = 680;
+  int maze_x_ = 28;
+  int maze_y_ = 118;
   int panel_x_ = 0;
   int tile_ = 13;
   int maze_px_w_ = 0;

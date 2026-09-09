@@ -186,3 +186,10 @@ endif()
 # Convenience targets.
 # ---------------------------------------------------------------------------
 add_custom_target(run COMMAND ./run.sh COMMENT "Launch via ./run.sh")
+
+# Frozen-weight evaluation on unseen maze seeds (core only).
+add_executable(sir_eval tools/evaluate.cpp)
+target_link_libraries(sir_eval PRIVATE sir_core)
+
+enable_testing()
+add_test(NAME sir_tests COMMAND sir_tests)

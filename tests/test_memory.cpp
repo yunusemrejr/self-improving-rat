@@ -52,6 +52,71 @@ TEST(replay_buffer_sampling_valid) {
   for (size_t i : idx) CHECK(i < rb.size());
 }
 
+TEST(replay_buffer_is_weights_are_sampling_odds) {
+  const int obs = 30, rnn = 16, cap = 100;
+  ReplayBuffer rb(obs, rnn, cap);
+  float s[30] = {0}, s2[30] = {0}, h[16] = {0}, tgt[3] = {0};
+  // 99 low-priority entries + 1 cheese-like high-priority entry.
+  for (int i = 0; i < cap - 1; ++i) rb.push(s, s2, h, 0, 0.0f, 0.0f, false, tgt);
+  rb.push(s, s2, h, 1, 0.0f, 0.0f, false, tgt);
+  rb.updatePriority(cap - 1, 100.0f);
+  Rng rng(2);
+  std::vector<size_t> idx;
+  std::vector<float> w;
+  double sum_high = 0.0, sum_low = 0.0;
+  int n_high = 0, n_low = 0;
+  for (int t = 0; t < 200; ++t) {
+    rb.sampleIndices(rng, 100, &idx, &w);
+    CHECK(idx.size() == w.size());
+    for (size_t k = 0; k < idx.size(); ++k) {
+      CHECK(w[k] > 0.0f);  // strictly positive odds
+      if (idx[k] == static_cast<size_t>(cap - 1)) { sum_high += w[k]; ++n_high; }
+      else { sum_low += w[k]; ++n_low; }
+    }
+  }
+  // The high-priority entry is sampled far more often and with far larger
+  // raw odds than the low-priority bulk.
+  CHECK(n_high > 0 && n_low > 0);
+  const double mean_high = sum_high / n_high;
+  const double mean_low = sum_low / n_low;
+  CHECK(mean_high > mean_low * 10.0);
+
+  // With uniform priorities every raw odds is ~1 (w = N * (1/N) / 1).
+  ReplayBuffer rb2(obs, rnn, 16);
+  for (int i = 0; i < 16; ++i) rb2.push(s, s2, h, 0, 0.0f, 0.0f, false, tgt);
+  Rng rng3(3);
+  rb2.sampleIndices(rng3, 200, &idx, &w);
+  for (float x : w) CHECK_NEAR(x, 1.0f, 1e-4);
+}
+
+TEST(sample_indices_optional_weights_does_not_change_draws) {
+  const int obs = 30, rnn = 16, cap = 100;
+  float s[30] = {0}, s2[30] = {0}, h[16] = {0}, tgt[3] = {0};
+  // Mixed priorities so the distribution is not flat.
+  ReplayBuffer rb_a(obs, rnn, cap);
+  ReplayBuffer rb_b(obs, rnn, cap);
+  for (int i = 0; i < cap; ++i) rb_a.push(s, s2, h, i % 4, 0.0f, 0.0f, false, tgt);
+  for (int i = 0; i < cap; ++i) rb_b.push(s, s2, h, i % 4, 0.0f, 0.0f, false, tgt);
+  rb_a.updatePriority(3, 50.0f);
+  rb_a.updatePriority(cap - 1, 80.0f);
+  rb_b.updatePriority(3, 50.0f);
+  rb_b.updatePriority(cap - 1, 80.0f);
+  std::vector<size_t> idx_a, idx_b;
+  std::vector<float> w;
+  Rng r1(42), r2(42);  // identical streams
+  rb_a.sampleIndices(r1, 500, &idx_a);            // 3-arg form
+  rb_b.sampleIndices(r2, 500, &idx_b, &w);        // 4-arg form
+  CHECK(idx_a == idx_b);  // adding the optional output must not change draws
+  CHECK(w.size() == idx_b.size());
+  // Raw odds mean over draws equals N*sum(p^2)/(sum p)^2 >= 1 under the
+  // sampling distribution (weights are odds, not a flat constant).
+  double mean = 0.0;
+  for (float x : w) mean += x;
+  mean /= static_cast<double>(w.size());
+  CHECK(mean >= 1.0 - 1e-3);
+  for (float x : w) CHECK(x > 0.0f);
+}
+
 TEST(replay_buffer_prioritized_sampling_biases_toward_high_priority) {
   const int obs = 30, rnn = 16, cap = 100;
   ReplayBuffer rb(obs, rnn, cap);

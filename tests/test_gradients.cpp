@@ -128,6 +128,111 @@ TEST(neuralnet_forward_deterministic_and_finite) {
   CHECK(net.allFinite());
 }
 
+TEST(gru_backward_grad_h_prev_matches_finite_difference) {
+  Rng rng(11);
+  const int in = 28, h = 16;
+  GruLayer gru(in, h, rng);
+  std::vector<float> x(in), hprev(h), hout(h), grad_h(h);
+  for (auto& v : x) v = static_cast<float>(rng.uniform(-1, 1));
+  for (auto& v : hprev) v = static_cast<float>(rng.uniform(-0.5, 0.5));
+  for (auto& v : grad_h) v = static_cast<float>(rng.uniform(-1, 1));
+  const int n = GruLayer::paramCount(in, h);
+  std::vector<float> grad_p(n), grad_hp(h);
+  gru.backward(x.data(), hprev.data(), hout.data(), grad_h.data(),
+               grad_p.data(), grad_hp.data());
+  std::vector<float> hp2(h), h2(h);
+  const float eps = 1e-2f;
+  std::vector<float> num(h);
+  for (int i = 0; i < h; ++i) {
+    hp2 = hprev;
+    hp2[i] += eps;
+    gru.forward(x.data(), hp2.data(), h2.data());
+    double lp = 0;
+    for (int j = 0; j < h; ++j) lp += static_cast<double>(h2[j]) * grad_h[j];
+    hp2 = hprev;
+    hp2[i] -= eps;
+    gru.forward(x.data(), hp2.data(), h2.data());
+    double lm = 0;
+    for (int j = 0; j < h; ++j) lm += static_cast<double>(h2[j]) * grad_h[j];
+    num[i] = static_cast<float>((lp - lm) / (2.0 * eps));
+  }
+  CHECK(worstRelDiff(num, grad_hp) < 0.05);
+}
+
+TEST(gru_bptt_two_step_chain_grad_h0_matches_finite_difference) {
+  Rng rng(12);
+  const int in = 28, h = 16;
+  GruLayer gru(in, h, rng);
+  std::vector<float> x0(in), x1(in), h0(h), w(h), h1(h), h2(h);
+  for (auto& v : x0) v = static_cast<float>(rng.uniform(-1, 1));
+  for (auto& v : x1) v = static_cast<float>(rng.uniform(-1, 1));
+  for (auto& v : h0) v = static_cast<float>(rng.uniform(-0.5, 0.5));
+  for (auto& v : w) v = static_cast<float>(rng.uniform(-1, 1));
+  const int n = GruLayer::paramCount(in, h);
+  std::vector<float> gp1(n), gp0(n), dhp1(h), dhp0(h);
+  // L = w . h2 with h2 = GRU(x1, h1), h1 = GRU(x0, h0): step 1's
+  // grad_h_prev feeds step 0 as the incoming flow (real 2-step BPTT).
+  gru.forward(x0.data(), h0.data(), h1.data());
+  gru.forward(x1.data(), h1.data(), h2.data());
+  gru.backward(x1.data(), h1.data(), h2.data(), w.data(), gp1.data(),
+               dhp1.data());
+  gru.backward(x0.data(), h0.data(), h1.data(), dhp1.data(), gp0.data(),
+               dhp0.data());
+  std::vector<float> h0p(h), h1p(h), h2p(h), num(h);
+  const float eps = 1e-2f;
+  for (int i = 0; i < h; ++i) {
+    h0p = h0;
+    h0p[i] += eps;
+    gru.forward(x0.data(), h0p.data(), h1p.data());
+    gru.forward(x1.data(), h1p.data(), h2p.data());
+    double lp = 0;
+    for (int j = 0; j < h; ++j) lp += static_cast<double>(h2p[j]) * w[j];
+    h0p = h0;
+    h0p[i] -= eps;
+    gru.forward(x0.data(), h0p.data(), h1p.data());
+    gru.forward(x1.data(), h1p.data(), h2p.data());
+    double lm = 0;
+    for (int j = 0; j < h; ++j) lm += static_cast<double>(h2p[j]) * w[j];
+    num[i] = static_cast<float>((lp - lm) / (2.0 * eps));
+  }
+  CHECK(worstRelDiff(num, dhp0) < 0.05);  // dL/dh0 through two GRU steps
+}
+
+TEST(neuralnet_backward_grad_h_prev_matches_finite_difference) {
+  Rng rng(13);
+  const int in = 30, rnn = 16, po = 4, pr = 16;
+  NeuralNet net(in, rnn, po, pr, rng);
+  std::vector<float> x(in), hprev(rnn), hout(rnn), q(po), pred(pr);
+  for (auto& v : x) v = static_cast<float>(rng.uniform(-1, 1));
+  for (auto& v : hprev) v = static_cast<float>(rng.uniform(-0.5, 0.5));
+  net.forward(x.data(), hprev.data(), hout.data(), q.data(), pred.data());
+  std::vector<float> grad_q(po), grad_pred(pr);
+  for (auto& v : grad_q) v = static_cast<float>(rng.uniform(-1, 1));
+  for (auto& v : grad_pred) v = static_cast<float>(rng.uniform(-1, 1));
+  const int n = net.paramCount();
+  std::vector<float> grad_p(n), grad_hp(rnn);
+  net.backward(x.data(), hprev.data(), hout.data(), grad_q.data(),
+               grad_pred.data(), grad_p.data(), grad_hp.data());
+  std::vector<float> hp2(rnn), h2(rnn), q2(po), pr2(pr), num(rnn);
+  const float eps = 1e-2f;
+  for (int i = 0; i < rnn; ++i) {
+    hp2 = hprev;
+    hp2[i] += eps;
+    net.forward(x.data(), hp2.data(), h2.data(), q2.data(), pr2.data());
+    double lp = 0;
+    for (int k = 0; k < po; ++k) lp += static_cast<double>(q2[k]) * grad_q[k];
+    for (int k = 0; k < pr; ++k) lp += static_cast<double>(pr2[k]) * grad_pred[k];
+    hp2 = hprev;
+    hp2[i] -= eps;
+    net.forward(x.data(), hp2.data(), h2.data(), q2.data(), pr2.data());
+    double lm = 0;
+    for (int k = 0; k < po; ++k) lm += static_cast<double>(q2[k]) * grad_q[k];
+    for (int k = 0; k < pr; ++k) lm += static_cast<double>(pr2[k]) * grad_pred[k];
+    num[i] = static_cast<float>((lp - lm) / (2.0 * eps));
+  }
+  CHECK(worstRelDiff(num, grad_hp) < 0.05);
+}
+
 TEST(neuralnet_param_and_mask_layouts) {
   Rng rng(9);
   const int in = 30, rnn = 16, po = 4, pr = 16;
@@ -136,7 +241,7 @@ TEST(neuralnet_param_and_mask_layouts) {
       GruLayer::paramCount(in, rnn) + rnn * po + po + rnn * pr + pr;
   CHECK(net.paramCount() == expected);
   // Mask covers exactly the weights (biases excluded); all bits set at init.
-  CHECK(net.activeCount() == net.paramCount() - (3 * rnn + po + pr));
+  CHECK(net.activeCount() == static_cast<size_t>(net.paramCount() - (3 * rnn + po + pr)));
   // Turning connections off through the plasticity API must actually change
   // inference (masks zero real weights).
   std::vector<float> x(in, 0.1f), hprev(rnn, 0.0f), h(rnn), q(po), pred(pr);

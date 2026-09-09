@@ -10,11 +10,11 @@ namespace sir {
 
 struct Config {
   // Window / rendering
-  int window_width = 960;
-  int window_height = 640;
+  int window_width = 1060;
+  int window_height = 680;
   int maze_width = 13;
   int maze_height = 9;
-  int tile_size = 24;
+  int tile_size = 48;
   int render_frames_per_second = 30;
   bool debug_display = false;
 
@@ -35,7 +35,7 @@ struct Config {
   // Learning
   int nn_hidden = 32;  // unused legacy knob; kept for compatibility
   int rnn_hidden = 16;
-  int observation_frames = 1;  // stacked base observations; input = 28 * frames
+  int observation_frames = 1;  // stacked base observations; input = 30 * frames
   double learning_rate = 0.0003;
   double discount_factor = 0.95;
   double target_update_tau = 0.02;
@@ -46,6 +46,27 @@ struct Config {
   int batch_size = 16;
   int train_interval_steps = 2;
   double gradient_clip_norm = 1.0;
+  // Bootstrap depth for n-step TD targets (1 = plain 1-step bootstrapping).
+  // Recomputed online/target continuation states; stop at sequence boundaries.
+  int n_step_returns = 1;
+  // Huber threshold for the TD loss (loss is quadratic inside, linear
+  // outside); a very large value approximates plain MSE.
+  double td_huber_delta = 1.0;
+  // Prioritized-replay importance-sampling correction exponent: the learner
+  // scales each sample's loss by (raw sampling odds)^(-beta), max-normalized.
+  // 0 disables the correction (plain proportional-sampling bias).
+  double per_is_beta = 0.5;
+  double per_priority_alpha = 0.6;
+  bool mask_wall_actions = true;
+  double episodic_action_bonus = 0.5;
+  int replay_burn_in = 4;
+  int sequence_train_interval = 32;  // online BPTT; 0 disables
+
+  // Chunked-BPTT consolidation sequence length (0 = disabled; clamp 0..8).
+  // The chunked-BPTT path trains the GRU recurrent chain during
+  // consolidation. It is on by default; set 0 to disable. Measured gains are
+  // modest and high-variance, so it is configurable to allow A/B.
+  int bptt_chunk_len = 8;
 
   // --- Organism: homeostasis (see organism/homeostasis.h) ---
   double energy_cost_step = 0.0004;
@@ -73,14 +94,10 @@ struct Config {
   double homeo_reward_stress = 0.004;
   double homeo_reward_satisfaction = 0.001;
   double curiosity_reward_gain = 0.02;
-  double prediction_reward_gain = 0.01;
+  double prediction_reward_gain = 0.0;
   double collapse_penalty = 0.01;
-  // Dense shaping from the rat's own scent perception: a bonus proportional
-  // to the strongest scent channel after the action (rewarding being near the
-  // cheese). Unlike a delta form it does not punish the detours a maze
-  // requires, so the value function develops a gradient toward the cheese
-  // that transfers across cheese re-placements.
-  double scent_proximity_reward_gain = 0.08;
+  // Discounted scent-potential difference; no stationary proximity bonus.
+  double scent_proximity_reward_gain = 0.8;
 
   // --- Organism: prediction / curiosity ---
   double prediction_loss_weight = 0.3;
