@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cmath>
 #include <array>
+#include <chrono>
 
 namespace sir {
 
@@ -76,18 +77,66 @@ std::string formatDuration(uint64_t seconds) {
   return buf;
 }
 
+struct PreparedNote {
+  std::vector<std::string> title, explanation, notation;
+  MathLayout math;
+  int height = 0, notation_x = 40;
+};
+
+PreparedNote prepareNote(const LearningNote& note, int width) {
+  const size_t columns = static_cast<size_t>((width-80)/12);
+  PreparedNote layout{wrapNoteText(note.title,columns),
+                      wrapNoteText(note.explanation,columns),
+                      wrapNoteText(note.notation,columns), typesetNoteMath(note.latex)};
+  const int opening_lines = static_cast<int>(layout.title.size()+layout.explanation.size());
+  layout.height = 92+22*(opening_lines+static_cast<int>(layout.notation.size()))+
+                  (layout.math.height ? layout.math.height+8 : 0);
+  if (width>=900 && layout.math.width && layout.math.width<=(width-80)/2) {
+    auto alongside = wrapNoteText(note.notation,(width-120-layout.math.width)/12);
+    const int height = 70+22*opening_lines+
+        std::max(layout.math.height,22+22*static_cast<int>(alongside.size()));
+    if (height<layout.height) {
+      layout.notation=std::move(alongside);
+      layout.notation_x=80+layout.math.width;
+      layout.height=height;
+    }
+  }
+  return layout;
+}
+
 }  // namespace
 
 bool Renderer::init(const Config& cfg, std::string* err) {
-  width_ = std::max(cfg.window_width, cfg.maze_width + 56);
-  height_ = std::max(cfg.window_height, cfg.maze_height + 216);
-  // Fit all supported mazes into the actual window without clipping.
-  maze_y_ = height_ < 400 ? 82 : 118;
+  note_config_ = cfg;
+  note_epsilon_ = cfg.exploration_start;
+  note_ready_ = false;
+  // This random stream is only for presentation; the simulation stays seeded.
+  notes_ = LearningNoteDeck(static_cast<uint32_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count()));
+  width_ = std::max({640, cfg.window_width, cfg.maze_width + 56});
+  int note_height = 0;
+  // Reserve the largest card once, including all live-value text variants.
+  // Notes never resize or shift the habitat while somebody is watching it.
+  for (size_t i = 0; i < learningNoteCount(); ++i) {
+    for (double epsilon : {0.0, 0.000001, 0.5, 0.999999, 1.0}) {
+      const auto note = learningNote(i, cfg, epsilon);
+      note_height = std::max(note_height, prepareNote(note,width_).height);
+    }
+  }
+  maze_y_ = 118;
+  height_ = std::max(cfg.window_height, note_height + 62 + maze_y_ +
+                         std::max(160, cfg.maze_height) + 44);
+  notes_y_ = height_ - 62 - note_height;
+  hold_button_ = {width_ - 264, notes_y_ + 8, 104, 28};
+  next_button_ = {width_ - 148, notes_y_ + 8, 104, 28};
+  // Fit the maze into the space above the explanations, with a compact panel
+  // on narrower windows. Keep body text at a readable fixed pixel size.
   const int reserve = width_ >= 900 ? 350 : 0;
   tile_ = std::max(1, std::min({cfg.tile_size, (width_ - 56 - reserve) / cfg.maze_width,
-                               (height_ - maze_y_ - 82) / cfg.maze_height}));
+                               (notes_y_ - maze_y_ - 44) / cfg.maze_height}));
   maze_px_w_ = cfg.maze_width * tile_;
   maze_px_h_ = cfg.maze_height * tile_;
+  maze_x_ = width_ < 900 ? (width_ - maze_px_w_) / 2 : 28;
   panel_x_ = maze_x_ + maze_px_w_ + 30;
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -121,6 +170,97 @@ void Renderer::shutdown() {
   ren_ = nullptr;
   win_ = nullptr;
   SDL_Quit();
+}
+
+bool Renderer::handleEvent(const SDL_Event& event) {
+  bool hold = false, next = false;
+  if (event.type == SDL_KEYDOWN) {
+    hold = event.key.keysym.sym == SDLK_h;
+    next = event.key.keysym.sym == SDLK_n;
+    if ((hold || next) && event.key.repeat) return true;
+  } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+    const SDL_Point p{event.button.x, event.button.y};
+    hold = SDL_PointInRect(&p, &hold_button_);
+    next = SDL_PointInRect(&p, &next_button_);
+  }
+  if (hold) notes_.toggleHold(SDL_GetTicks64());
+  if (next) { notes_.next(); note_ready_ = false; }
+  return hold || next;
+}
+
+void Renderer::drawNoteText(int x, int y, const std::string& text, SDL_Color ink) {
+  color(ren_, ink);
+  for (unsigned char c : text) {
+    if (const auto* rows = noteGlyph(c)) {
+      for (int row = 0; row < 9; ++row)
+        for (int col = 0; col < 5; ++col)
+          if ((*rows)[row] & (1u << (4-col))) {
+            SDL_Rect pixel{x+col*2,y+row*2,2,2};
+            SDL_RenderFillRect(ren_, &pixel);
+          }
+    }
+    x += 12;
+  }
+}
+
+void Renderer::drawMath(int x, int y, const MathLayout& layout) {
+  color(ren_, kGold);
+  for (const auto& mark : layout.marks) {
+    if (!mark.glyph) {
+      SDL_RenderDrawLine(ren_, x+mark.x, y+mark.y, x+mark.x2, y+mark.y2);
+      SDL_RenderDrawLine(ren_, x+mark.x, y+mark.y+1, x+mark.x2, y+mark.y2+1);
+    } else if (const auto* rows = noteGlyph(mark.glyph)) {
+      for (int row = 0; row < 9; ++row)
+        for (int col = 0; col < 5; ++col)
+          if ((*rows)[row] & (1u << (4-col))) {
+            SDL_Rect pixel{x+mark.x+col*mark.scale,y+mark.y+row*mark.scale,mark.scale,mark.scale};
+            SDL_RenderFillRect(ren_, &pixel);
+          }
+    }
+  }
+}
+
+void Renderer::openLearningNote(uint64_t now) {
+  note_ = learningNote(notes_.current(), note_config_, note_epsilon_);
+  auto layout = prepareNote(note_,width_);
+  note_title_ = std::move(layout.title);
+  note_explanation_ = std::move(layout.explanation);
+  note_notation_ = std::move(layout.notation);
+  note_math_ = std::move(layout.math);
+  note_notation_x_ = layout.notation_x;
+  notes_.start(now, noteReadingTime(note_));
+  note_ready_ = true;
+}
+
+void Renderer::drawLearningNote(uint64_t now) {
+  if (!note_ready_) openLearningNote(now);
+  else if (notes_.due(now)) { notes_.next(); openLearningNote(now); }
+  color(ren_, kWall);
+  SDL_RenderDrawLine(ren_, 28, notes_y_, width_-28, notes_y_);
+  drawText(40, notes_y_+17, note_.category, 2, kText.r, kText.g, kText.b);
+  for (const auto& button : {hold_button_, next_button_})
+    rounded(ren_, button.x, button.y, button.w, button.h, 6, kWall);
+  drawNoteText(hold_button_.x+16, hold_button_.y+6, notes_.held()?"H Play":"H Hold", kTextHi);
+  drawNoteText(next_button_.x+16, next_button_.y+6, "N Next", kTextHi);
+  int y = notes_y_+42;
+  for (const auto& line : note_title_) { drawNoteText(40,y,line,kGold); y+=22; }
+  y += 8;
+  for (const auto& line : note_explanation_) { drawNoteText(40,y,line,kTextHi); y+=22; }
+  if (note_math_.height) {
+    if (note_notation_x_>40) {
+      const int block_height=std::max(note_math_.height,22+22*static_cast<int>(note_notation_.size()));
+      drawMath(40,y+8+(block_height-note_math_.height)/2,note_math_);
+    } else { y+=8; drawMath(40,y,note_math_); y+=note_math_.height; }
+  }
+  y += 8;
+  drawText(note_notation_x_, y, note_.latex.empty()?"WHAT THIS MEANS":"THE SYMBOLS, IN PLAIN LANGUAGE",
+           2,kText.r,kText.g,kText.b);
+  y += 22;
+  for (const auto& line : note_notation_) { drawNoteText(note_notation_x_,y,line,kTextHi); y+=22; }
+  const std::string timer = notes_.held() ? (width_<900 ? "Held (H)" : "Held - H to resume") :
+      std::string(width_<900 ? "Next in " : "Next note in ") +
+      std::to_string((notes_.remaining(now)+999)/1000) + "s";
+  drawNoteText(width_-28-static_cast<int>(timer.size())*12,height_-48,timer,kText);
 }
 
 void Renderer::fillRect(int x, int y, int w, int h, uint8_t r, uint8_t g,
@@ -250,8 +390,8 @@ void Renderer::drawStatusBar(const PanelData& p) {
 }
 
 void Renderer::drawPanel(const PanelData& p) {
-  if (panel_x_ + 286 > width_) {
-    drawText(28, height_ - 72, "CHEESE " + formatInt(p.cheese_total) +
+  if (width_ < 900 || panel_x_ + 286 > width_) {
+    drawText(28, notes_y_ - 24, "CHEESE " + formatInt(p.cheese_total) +
              "  STEPS " + formatInt(p.lifetime_steps), width_ >= 600 ? 2 : 1,
              kTextHi.r, kTextHi.g, kTextHi.b);
     return;
@@ -259,10 +399,10 @@ void Renderer::drawPanel(const PanelData& p) {
   const int x = panel_x_;
   int y = 120;
   auto row = [&](const std::string& text, bool hi = false) {
-    if (y > height_ - 75) return;
+    if (y > notes_y_ - 24) return;
     drawText(x, y, text, 2, hi ? kTextHi.r : kText.r,
              hi ? kTextHi.g : kText.g, hi ? kTextHi.b : kText.b);
-    y += 23;
+    y += 20;
   };
   if (p.debug) {
     row("TRAINING DIAGNOSTICS", true); y += 6;
@@ -286,6 +426,7 @@ void Renderer::drawPanel(const PanelData& p) {
     return;
   }
   auto meter = [&](const std::string& label, double value, SDL_Color c) {
+    if (y > notes_y_ - 40) return;
     row(label + "  " + formatFloat(value * 100, 0) + "%");
     rounded(ren_, x, y-5, 260, 5, 2, kWall);
     const int w = int(260 * std::clamp(value, 0.0, 1.0));
@@ -308,6 +449,7 @@ void Renderer::drawPanel(const PanelData& p) {
 }
 
 void Renderer::render(const Simulation& sim, const PanelData& panel) {
+  note_epsilon_ = panel.epsilon;
   SDL_SetRenderDrawColor(ren_, kBg.r, kBg.g, kBg.b, 255);
   SDL_RenderClear(ren_);
 
@@ -316,6 +458,7 @@ void Renderer::render(const Simulation& sim, const PanelData& panel) {
   drawRat(sim, panel.consolidating);
   drawStatusBar(panel);
   drawPanel(panel);
+  drawLearningNote(SDL_GetTicks64());
 
   SDL_RenderPresent(ren_);
 }

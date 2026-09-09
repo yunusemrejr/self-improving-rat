@@ -9,9 +9,8 @@ single-threaded C++20 desktop application with an SDL2 renderer.
 
 **Honest framing.** This project is a self-contained artificial-life study,
 not a claim of general intelligence or consciousness. The rat reliably
-*attempts* to improve: its parameters genuinely change from experience and it
-finds cheese more often than pure exploration would, but **long-term monotonic
-intelligence growth is not guaranteed**. Maze navigation with sparse, moving
+*attempts* to improve: its parameters change from experience, but **long-term
+monotonic intelligence growth is not guaranteed**. Maze navigation with sparse, moving
 rewards is hard for the built-in learner; measured behavior is documented in
 [How improvement is measured](#how-improvement-is-measured) and in the
 test suite.
@@ -20,7 +19,8 @@ test suite.
 
 The September 2026 update adds grey fur, ears, whiskers and a curved tail;
 three-faced golden cheese wedges; rounded warm corridors; and an always-visible
-learning panel. The learner now saves recent replay, reconstructs recurrent
+learning panel with rotating, plain-language mathematical explanations.
+The learner now saves recent replay, reconstructs recurrent
 sequences, avoids observed walls and uses episodic action counts to explore.
 See [measured results and validation](docs/validation-20260909.md).
 
@@ -73,12 +73,29 @@ SDL_VIDEODRIVER=dummy SIR_MAX_STEPS=2000 SIR_SCREENSHOT=/tmp/rat.bmp ./build/sir
 | `R` | regenerate the maze (learned weights are untouched) |
 | `S` | save a checkpoint immediately |
 | `D` | toggle the diagnostics panel |
+| `H` | hold / resume the rotating learning note |
+| `N` | show the next learning note (also while held) |
 | `Esc` | save and exit |
 | window close | save and exit |
 
 `SIGINT`/`SIGTERM` also trigger a clean save-and-exit; a second signal exits
 immediately. All checkpoints are written atomically (temp file + fsync +
 rename, previous valid checkpoint kept as `.bak`).
+
+The bottom reader shuffles 26 explanations of the actual experiment: Double-DQN,
+GRU memory, prioritized replay, burn-in, curiosity, reward shaping, persistence,
+and more. Formulas have a plain-language symbol guide; worked probabilities
+use the current configuration and the exploration rate when the note opens.
+Conditional examples and possible emergent behavior are labeled separately
+from observations. The app does not estimate a probability of future mastery.
+
+Notes rotate at a reading-paced interval (24–60 seconds). Click **Hold** or
+**Next**, or use `H` / `N`; holding the text is independent of pausing the rat.
+Its separate random stream never changes training randomness. The reader uses
+an included sentence-case bitmap alphabet and a small LaTeX typesetter, with
+no network or additional runtime dependencies. The default window is now
+1060×960; smaller requested windows expand to at least 640 pixels wide and
+the height needed for readable notes and a compact habitat.
 
 ---
 
@@ -103,8 +120,8 @@ config ──▶ Application ──▶ Simulation (maze, rat, cheese, body)
   consolidation, autosave and the render loop.
 - **Renderer** uses SDL2 software drawing with a dark habitat, warm rounded
   paths, a grey rat and golden cartoon cheese. It needs no textures, external
-  assets, GPU or network. The maze fits the configured window; a compact
-  bitmap font labels real organism and learning metrics.
+  assets, GPU or network. The maze fits above a rotating learning reader;
+  bitmap fonts label real organism metrics and typeset explanatory formulas.
 
 ## Simulation rules
 
@@ -374,3 +391,8 @@ fallback, incompatible-topology handling, deterministic seeds, plasticity
 hard limits and mask round-trips, consolidation op bounds, long-run
 boundedness, and learning-integration cheese finding. The suite is also run
 under AddressSanitizer + UndefinedBehaviorSanitizer.
+
+`ctest --test-dir build --output-on-failure` also runs the actual SDL renderer
+with a dummy video driver. Reader checks cover shuffled rotation, hold/resume,
+keyboard and mouse controls, all 26 notes, narrow layouts, mathematical glyphs,
+probability examples and independence from simulation randomness.

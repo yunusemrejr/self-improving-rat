@@ -104,6 +104,28 @@ corridors replace the square monochrome grid. The normal panel exposes real
 memory, replay, neural-update and save counts; D shows training diagnostics.
 At very small windows the maze fits with smaller cells and compact counters.
 
+### Learning reader follow-up
+
+The subsequent reader update adds 26 shuffled explanations with source
+provenance, configuration-aware examples, and typeset formulas with symbol
+guides. Very high or low probabilities use bounds instead of rounding to
+certainty or impossibility. Possible emergent routes and generalization are
+described without inventing a probability of future mastery.
+
+The Release suite now contains 93 core tests, plus an SDL integration target.
+Tests check mathematical glyphs and layout bounds, probability examples and
+disabled settings, no-repeat shuffle bags, hold/resume timing, keyboard repeat,
+mouse controls and unchanged simulation RNG. The SDL test renders every note
+at default and compact sizes, including while the simulation is paused.
+The actual application also saved and resumed an isolated temporary checkpoint.
+
+The default window is now 1060×960. Compact requested sizes expand to at least
+640 pixels wide and enough height for the longest note, avoiding tiny type or
+clipped explanations. Formula and notation are placed beside each other when
+space allows, and the habitat stays fixed as notes rotate. Screenshots of the
+software renderer were inspected for readable formulas and unobstructed
+controls. These presentation changes do not change the learning benchmark above.
+
 ## Reproduce
 
 ```bash

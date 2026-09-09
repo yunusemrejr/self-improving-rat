@@ -143,6 +143,8 @@ set(SIR_CORE_SOURCES
     src/utility/rng.cpp
     src/utility/rolling_stats.cpp
     src/utility/bitmap_font.cpp
+    src/rendering/learning_notes.cpp
+    src/rendering/note_typesetting.cpp
     src/organism/homeostasis.cpp
     src/organism/development.cpp
     src/organism/episodic_memory.cpp
@@ -193,3 +195,10 @@ target_link_libraries(sir_eval PRIVATE sir_core)
 
 enable_testing()
 add_test(NAME sir_tests COMMAND sir_tests)
+
+# Exercise the actual UI without a display server or the user's saved rat.
+add_executable(sir_render_tests tests/rendering/smoke.cpp src/rendering/renderer.cpp)
+target_include_directories(sir_render_tests PRIVATE include ${SDL2_INCLUDE_DIRS})
+target_link_libraries(sir_render_tests PRIVATE sir_core ${SDL2_LIBRARIES})
+add_test(NAME sir_render_tests COMMAND sir_render_tests)
+set_tests_properties(sir_render_tests PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")

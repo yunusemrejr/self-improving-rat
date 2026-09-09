@@ -11,7 +11,7 @@ namespace sir {
 struct Config {
   // Window / rendering
   int window_width = 1060;
-  int window_height = 680;
+  int window_height = 960;
   int maze_width = 13;
   int maze_height = 9;
   int tile_size = 48;

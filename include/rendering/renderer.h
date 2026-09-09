@@ -3,6 +3,8 @@
 
 #include "simulation/simulation.h"
 #include "utility/config.h"
+#include "rendering/learning_notes.h"
+#include "rendering/note_typesetting.h"
 
 #include <SDL.h>
 
@@ -76,6 +78,7 @@ class Renderer {
   bool init(const Config& cfg, std::string* err);
   void shutdown();
   void render(const Simulation& sim, const PanelData& panel);
+  bool handleEvent(const SDL_Event& event);
   bool saveScreenshot(const std::string& path) const;
 
  private:
@@ -84,19 +87,33 @@ class Renderer {
   void drawCheese(const Simulation& sim);
   void drawPanel(const PanelData& panel);
   void drawStatusBar(const PanelData& panel);
+  void drawLearningNote(uint64_t now);
+  void openLearningNote(uint64_t now);
+  void drawNoteText(int x, int y, const std::string& text, SDL_Color color);
+  void drawMath(int x, int y, const MathLayout& layout);
   void drawText(int x, int y, const std::string& text, int scale, uint8_t r,
                 uint8_t g, uint8_t b);
   void fillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 
   SDL_Window* win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
-  int width_ = 1060, height_ = 680;
+  int width_ = 1060, height_ = 960;
   int maze_x_ = 28;
   int maze_y_ = 118;
   int panel_x_ = 0;
   int tile_ = 13;
   int maze_px_w_ = 0;
   int maze_px_h_ = 0;
+  Config note_config_;
+  LearningNoteDeck notes_{0};
+  LearningNote note_;
+  std::vector<std::string> note_title_, note_explanation_, note_notation_;
+  MathLayout note_math_;
+  int note_notation_x_ = 40;
+  int notes_y_ = 0;
+  double note_epsilon_ = 0;
+  bool note_ready_ = false;
+  SDL_Rect hold_button_{}, next_button_{};
 };
 
 }  // namespace sir

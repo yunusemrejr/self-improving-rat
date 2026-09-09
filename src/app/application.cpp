@@ -156,6 +156,7 @@ int Application::run(const Options& opts) {
     // --- events ---
     SDL_Event ev;
     while (!opts.headless && SDL_PollEvent(&ev)) {
+      if (renderer_.handleEvent(ev)) continue;
       if (ev.type == SDL_QUIT) quit = true;
       if (ev.type == SDL_KEYDOWN) {
         switch (ev.key.keysym.sym) {
